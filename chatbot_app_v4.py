@@ -334,8 +334,43 @@ FECHA ACTUAL: {current_date}."""
 _CITATION_SEPARATOR = "\n\n---\n📚 **Fuentes:**"
 
 
+def _resolve_inline_citations(
+    text: str, sources: List[Dict[str, str]]
+) -> str:
+    """Replace [N] citation markers in text with superscript markdown links.
+
+    Perplexity returns inline markers like [1], [3] that are 1-indexed into
+    the search_results list.  We convert each to a clickable superscript:
+      [3] -> [³](url)
+    so they render as small linked numbers in markdown.
+    """
+    if not sources:
+        return text
+
+    _SUPERSCRIPT = {
+        0: "⁰", 1: "¹", 2: "²", 3: "³", 4: "⁴",
+        5: "⁵", 6: "⁶", 7: "⁷", 8: "⁸", 9: "⁹",
+    }
+
+    def _to_super(n: int) -> str:
+        return "".join(_SUPERSCRIPT.get(int(d), d) for d in str(n))
+
+    def _replace_marker(match: re.Match) -> str:
+        idx = int(match.group(1)) - 1  # 1-indexed -> 0-indexed
+        if idx < 0 or idx >= len(sources):
+            return match.group(0)  # leave unknown markers as-is
+        src = sources[idx]
+        url = src.get("url", "")
+        if not url:
+            return match.group(0)
+        sup = _to_super(idx + 1)
+        return f"[{sup}]({url})"
+
+    return re.sub(r'\[(\d+)\]', _replace_marker, text)
+
+
 def _format_sources(sources: List[Dict[str, str]]) -> str:
-    """Format sources as a markdown footer."""
+    """Format sources as a numbered markdown footer."""
     if not sources:
         return ""
     lines = [_CITATION_SEPARATOR]
@@ -425,16 +460,18 @@ def _perplexity_request(
     text = data["choices"][0]["message"]["content"]
 
     sources: List[Dict[str, str]] = []
-    if data.get("search_results"):
-        for sr in data["search_results"]:
-            sources.append({
-                "title": sr.get("title", ""),
-                "url": sr.get("url", ""),
-                "snippet": sr.get("snippet", ""),
-            })
-    elif data.get("citations"):
-        for url in data["citations"]:
+    for sr in data.get("search_results", []):
+        sources.append({
+            "title": sr.get("title", ""),
+            "url": sr.get("url", ""),
+            "snippet": sr.get("snippet", ""),
+        })
+    if not sources:
+        for url in data.get("citations", []):
             sources.append({"title": "", "url": url, "snippet": ""})
+
+    # Resolve inline [N] markers into clickable superscript links
+    text = _resolve_inline_citations(text, sources)
 
     return text, sources
 
