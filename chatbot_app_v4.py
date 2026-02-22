@@ -18,6 +18,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 import streamlit as st
+from fpdf import FPDF
+from io import BytesIO
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -386,6 +388,226 @@ def _format_sources(sources: List[Dict[str, str]]) -> str:
         display = title if title else domain
         lines.append(f"{i}. [{display}]({url})")
     return "\n".join(lines) if len(lines) > 1 else ""
+
+
+# ---------------------------------------------------------------------------
+# PDF Generation for Match Preparation
+# ---------------------------------------------------------------------------
+
+_PDF_FONT = "Helvetica"
+
+# Regex patterns to strip markdown / emoji for clean PDF text
+_RE_MD_BOLD = re.compile(r'\*\*(.+?)\*\*')
+_RE_MD_ITALIC = re.compile(r'\*(.+?)\*')
+_RE_MD_LINK = re.compile(r'\[([^\]]+)\]\([^)]+\)')
+_RE_MD_HEADER = re.compile(r'^#{1,6}\s+')
+_RE_SUPERSCRIPT_LINK = re.compile(r'\[[\u2070-\u2079\u00B2\u00B3\u00B9]+\]\([^)]+\)')
+_RE_CITATION_BLOCK = re.compile(r'\n---\n.*?Fuentes:.*', re.DOTALL)
+
+
+def _strip_markdown(text: str) -> str:
+    """Convert markdown text to plain text suitable for PDF."""
+    text = _RE_CITATION_BLOCK.sub('', text)
+    text = _RE_SUPERSCRIPT_LINK.sub('', text)
+    text = _RE_MD_LINK.sub(r'\1', text)
+    text = _RE_MD_BOLD.sub(r'\1', text)
+    text = _RE_MD_ITALIC.sub(r'\1', text)
+    text = _RE_MD_HEADER.sub('', text)
+    return text.strip()
+
+
+def _clean_for_latin(text: str) -> str:
+    """Replace characters outside latin-1 with close equivalents."""
+    replacements = {
+        '\u2013': '-', '\u2014': '-', '\u2018': "'", '\u2019': "'",
+        '\u201c': '"', '\u201d': '"', '\u2026': '...',
+        '\u2070': '0', '\u00b9': '1', '\u00b2': '2', '\u00b3': '3',
+        '\u2074': '4', '\u2075': '5', '\u2076': '6', '\u2077': '7',
+        '\u2078': '8', '\u2079': '9',
+        '\u26a1': '[!]', '\U0001f3af': '[*]',
+        '\U0001f9e4': '', '\U0001f6e1': '', '\U0001f3af': '', '\u26a1': '[!]',
+        '\u2705': '[OK]', '\u274c': '[X]', '\U0001f50d': '',
+        '\U0001f4ca': '', '\U0001f4cb': '', '\U0001f3c6': '',
+        '\U0001f3df': '', '\U0001f3e0': '', '\u2708': '',
+        '\U0001f4cc': '', '\U0001f680': '', '\U0001f5d1': '',
+        '\U0001f3d9': '', '\U0001f30d': '',
+        '\U0001f399': '', '\U0001f4da': '',
+        '\U0001f46b': '', '\U0001f465': '',
+    }
+    for char, repl in replacements.items():
+        text = text.replace(char, repl)
+    # Fallback: replace any remaining non-latin1 chars
+    cleaned = []
+    for ch in text:
+        try:
+            ch.encode('latin-1')
+            cleaned.append(ch)
+        except UnicodeEncodeError:
+            cleaned.append(' ')
+    return ''.join(cleaned)
+
+
+class _MatchPDF(FPDF):
+    """Custom FPDF subclass for match preparation reports."""
+
+    def __init__(self, config: dict) -> None:
+        super().__init__(orientation='P', unit='mm', format='A4')
+        self.config = config
+        self.set_auto_page_break(auto=True, margin=20)
+
+    # -- header / footer --
+    def header(self):
+        if self.page_no() == 1:  # cover has no header
+            return
+        self.set_font(_PDF_FONT, 'I', 8)
+        home = _clean_for_latin(self.config['home_team'])
+        away = _clean_for_latin(self.config['away_team'])
+        self.cell(0, 6, f"{home} vs {away} - Preparacion de Partido", align='C')
+        self.ln(8)
+
+    def footer(self):
+        if self.page_no() == 1:
+            return
+        self.set_y(-15)
+        self.set_font(_PDF_FONT, 'I', 8)
+        self.cell(0, 10, f"Pagina {self.page_no() - 1}", align='C')
+
+    # -- helpers --
+    def _section_title(self, title: str):
+        self.set_font(_PDF_FONT, 'B', 14)
+        self.cell(0, 10, _clean_for_latin(title), ln=True)
+        self.ln(2)
+
+    def _sub_title(self, title: str):
+        self.set_font(_PDF_FONT, 'B', 11)
+        self.cell(0, 8, _clean_for_latin(title), ln=True)
+        self.ln(1)
+
+    def _body_text(self, text: str, size: int = 9):
+        self.set_font(_PDF_FONT, '', size)
+        clean = _clean_for_latin(_strip_markdown(text))
+        self.multi_cell(0, 4.5, clean)
+        self.ln(2)
+
+    # -- cover page --
+    def add_cover(self):
+        self.add_page()
+        self.ln(60)
+
+        self.set_font(_PDF_FONT, 'B', 28)
+        home = _clean_for_latin(self.config['home_team'])
+        away = _clean_for_latin(self.config['away_team'])
+        self.cell(0, 14, home, ln=True, align='C')
+        self.ln(4)
+        self.set_font(_PDF_FONT, '', 18)
+        self.cell(0, 10, 'vs', ln=True, align='C')
+        self.ln(4)
+        self.set_font(_PDF_FONT, 'B', 28)
+        self.cell(0, 14, away, ln=True, align='C')
+
+        self.ln(16)
+        self.set_font(_PDF_FONT, '', 14)
+        meta = _clean_for_latin(
+            f"{self.config['match_type']}  |  {self.config['tournament']}"
+        )
+        self.cell(0, 8, meta, ln=True, align='C')
+
+        self.ln(4)
+        self.set_font(_PDF_FONT, '', 12)
+        stadium = _clean_for_latin(self.config['stadium'])
+        self.cell(0, 8, stadium, ln=True, align='C')
+
+        self.ln(8)
+        self.set_font(_PDF_FONT, 'I', 10)
+        self.cell(0, 8, CURRENT_DATE, ln=True, align='C')
+
+        self.ln(30)
+        self.set_font(_PDF_FONT, '', 9)
+        self.cell(0, 6, 'Preparacion de Partido - PalomoFacts', ln=True, align='C')
+
+    # -- team histories --
+    def add_team_histories(self, results: dict):
+        # Home team history
+        self.add_page()
+        home_label = _clean_for_latin(f"Historial de Temporadas - LOCAL: {self.config['home_team']}")
+        self._section_title(home_label)
+
+        home_text = results['home_history'][0] if isinstance(results['home_history'], tuple) else ''
+        if home_text:
+            self._body_text(home_text, size=9)
+
+        # Away team history
+        self.add_page()
+        away_label = _clean_for_latin(f"Historial de Temporadas - VISITANTE: {self.config['away_team']}")
+        self._section_title(away_label)
+
+        away_text = results['away_history'][0] if isinstance(results['away_history'], tuple) else ''
+        if away_text:
+            self._body_text(away_text, size=9)
+
+    # -- roster per team --
+    def _add_roster_section(self, team_name: str, roster: list, label: str):
+        self.add_page()
+        self._section_title(f'Plantilla - {label}: {team_name}')
+
+        pos_order = ['GK', 'DEF', 'MID', 'FWD']
+        pos_names = {
+            'GK': 'PORTEROS', 'DEF': 'DEFENSAS',
+            'MID': 'CENTROCAMPISTAS', 'FWD': 'DELANTEROS',
+        }
+        grouped: Dict[str, list] = {p: [] for p in pos_order}
+        for player in roster:
+            pos = player.get('position', 'FWD')
+            if pos not in grouped:
+                pos = 'FWD'
+            grouped[pos].append(player)
+
+        for pos in pos_order:
+            players = grouped[pos]
+            if not players:
+                continue
+            self._sub_title(pos_names.get(pos, pos))
+            for p in players:
+                number = p.get('number', '')
+                name = _clean_for_latin(p['name'])
+                header = f"#{number} {name}" if number else name
+
+                # Player name as bold line
+                self.set_font(_PDF_FONT, 'B', 10)
+                self.cell(0, 6, header, ln=True)
+
+                # Player dossier body
+                body = p.get('text', '')
+                if body:
+                    self._body_text(body, size=8)
+
+                # Page break safety — if less than 30mm left, new page
+                if self.get_y() > self.h - 30:
+                    self.add_page()
+
+    def add_rosters(self, results: dict):
+        home = _clean_for_latin(self.config['home_team'])
+        away = _clean_for_latin(self.config['away_team'])
+        self._add_roster_section(home, results.get('home_roster', []), 'Local')
+        self._add_roster_section(away, results.get('away_roster', []), 'Visitante')
+
+    # -- Palomo phrases --
+    def add_palomo_phrases(self, results: dict):
+        self.add_page()
+        self._section_title('Frases de Fernando Palomo')
+        text = results['palomo_phrases'][0] if isinstance(results['palomo_phrases'], tuple) else ''
+        if text:
+            self._body_text(text, size=10)
+
+
+def generate_match_pdf(config: dict, results: dict) -> bytes:
+    """Generate a complete match preparation PDF and return it as bytes."""
+    pdf = _MatchPDF(config)
+    pdf.add_cover()
+    pdf.add_team_histories(results)
+    pdf.add_rosters(results)
+    pdf.add_palomo_phrases(results)
+    return pdf.output()
 
 
 # ---------------------------------------------------------------------------
@@ -1288,6 +1510,19 @@ def _display_match_results(config: dict, results: dict) -> None:
         f'{match_type} · {tournament} · 🏟️ {stadium}'
         f'</div></div>',
         unsafe_allow_html=True,
+    )
+
+    # ---- PDF download button ----
+    pdf_bytes = generate_match_pdf(config, results)
+    safe_home = re.sub(r'[^\w\s-]', '', home).strip().replace(' ', '_')
+    safe_away = re.sub(r'[^\w\s-]', '', away).strip().replace(' ', '_')
+    pdf_filename = f"Preparacion_{safe_home}_vs_{safe_away}.pdf"
+    st.download_button(
+        label="📥 Descargar PDF del Informe",
+        data=pdf_bytes,
+        file_name=pdf_filename,
+        mime="application/pdf",
+        use_container_width=True,
     )
 
     # ---- Team Histories (side-by-side) ----
