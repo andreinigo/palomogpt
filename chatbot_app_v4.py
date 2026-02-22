@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""FernandoFacts – Streamlit app with two modes:
+"""PalomoFacts – Streamlit app with two modes:
 
   1. PalomoGPT: unified conversational football intelligence with auto-router
   2. Preparación de Partidos: structured match preparation reports
@@ -906,7 +906,7 @@ _EXAMPLE_QUERIES = [
 # ---------------------------------------------------------------------------
 def main() -> None:
     st.set_page_config(
-        page_title="FernandoFacts · Football Intelligence",
+        page_title="PalomoFacts · Football Intelligence",
         page_icon="⚽",
         layout="wide",
         initial_sidebar_state="expanded",
@@ -919,7 +919,7 @@ def main() -> None:
     # ---- Sidebar ----
     with st.sidebar:
         st.markdown(
-            '<p class="hero-title" style="font-size:1.4rem;">⚽ FernandoFacts</p>',
+            '<p class="hero-title" style="font-size:1.4rem;">⚽ PalomoFacts</p>',
             unsafe_allow_html=True,
         )
         st.markdown("---")
@@ -965,7 +965,7 @@ def main() -> None:
                 st.rerun()
 
         st.markdown(
-            '<div class="app-footer">FernandoFacts v4 · AI: Perplexity Sonar Pro</div>',
+            '<div class="app-footer">PalomoFacts v4 · AI: Perplexity Sonar Pro</div>',
             unsafe_allow_html=True,
         )
 
