@@ -8,7 +8,6 @@ Powered by Perplexity Sonar Pro with real-time web search.
 """
 from __future__ import annotations
 
-import os
 import traceback
 from datetime import datetime
 import json
@@ -914,7 +913,7 @@ def main() -> None:
 
     st.markdown(_CUSTOM_CSS, unsafe_allow_html=True)
 
-    api_key = os.environ.get("PERPLEXITY_API_KEY", "")
+    api_key = st.secrets.get("PERPLEXITY_API_KEY", "")
 
     # ---- Sidebar ----
     with st.sidebar:
@@ -1050,7 +1049,7 @@ def _render_palomo_gpt(api_key: str) -> None:
         with st.chat_message("assistant"):
             err = (
                 "⚠️ No se encontró la API key de Perplexity. "
-                "Configura `PERPLEXITY_API_KEY` en tu archivo `.env`."
+                "Configura `PERPLEXITY_API_KEY` en los secrets de Streamlit."
             )
             st.warning(err)
             msgs.append({"role": "assistant", "content": err})
@@ -1149,7 +1148,7 @@ def _render_match_prep(api_key: str) -> None:
         if not api_key:
             st.error(
                 "⚠️ No se encontró la API key de Perplexity. "
-                "Configura `PERPLEXITY_API_KEY` en tu archivo `.env`."
+                "Configura `PERPLEXITY_API_KEY` en los secrets de Streamlit."
             )
             return
 
