@@ -11,7 +11,6 @@ from __future__ import annotations
 import os
 import traceback
 from datetime import datetime
-from pathlib import Path
 import json
 import re
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -20,13 +19,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 import streamlit as st
-
-# Ensure .env is loaded
-try:
-    from dotenv import load_dotenv
-    load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
-except Exception:
-    pass
 
 # ---------------------------------------------------------------------------
 # Constants
