@@ -1020,22 +1020,22 @@ _CUSTOM_CSS = """
 <style>
 /* ---- Base ---- */
 [data-testid="stAppViewContainer"] {
-    background: linear-gradient(170deg, #0a0f1a 0%, #101828 100%);
+    background: linear-gradient(170deg, #f8fafc 0%, #f1f5f9 100%);
 }
 [data-testid="stSidebar"] {
-    background: #0d1321;
-    border-right: 1px solid #1e293b;
+    background: #ffffff;
+    border-right: 1px solid #e2e8f0;
 }
 [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
 [data-testid="stSidebar"] label {
-    color: #94a3b8;
+    color: #475569;
 }
 
 /* Header */
 .hero-title {
     font-size: 2.2rem;
     font-weight: 800;
-    background: linear-gradient(135deg, #22d3ee 0%, #6366f1 50%, #a855f7 100%);
+    background: linear-gradient(135deg, #0ea5e9 0%, #4f46e5 50%, #9333ea 100%);
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
     letter-spacing: -0.5px;
@@ -1050,69 +1050,73 @@ _CUSTOM_CSS = """
 
 /* Welcome card */
 .welcome-card {
-    background: linear-gradient(135deg, #141c2e 0%, #1a2540 100%);
-    border: 1px solid #1e293b;
+    background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%);
+    border: 1px solid #e2e8f0;
     border-radius: 16px;
     padding: 32px;
     margin: 20px 0;
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
 }
 .welcome-card h3 {
-    color: #e2e8f0;
+    color: #1e293b;
     font-size: 1.15rem;
     margin-bottom: 12px;
 }
 .welcome-card p {
-    color: #94a3b8;
+    color: #475569;
     font-size: 0.9rem;
     line-height: 1.6;
 }
 
 /* Match prep header */
 .match-header {
-    background: linear-gradient(135deg, #1a1040 0%, #0f2040 50%, #1a1040 100%);
-    border: 1px solid #2d3a5e;
+    background: linear-gradient(135deg, #eff6ff 0%, #e0e7ff 50%, #eff6ff 100%);
+    border: 1px solid #c7d2fe;
     border-radius: 16px;
     padding: 28px 32px;
     margin: 16px 0 24px;
     text-align: center;
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
 }
 .match-header h2 {
-    color: #f1f5f9;
+    color: #1e293b;
     font-size: 1.8rem;
     font-weight: 800;
     margin: 0;
 }
 .match-header .match-meta {
-    color: #818cf8;
+    color: #4338ca;
     font-size: 0.95rem;
     margin-top: 8px;
 }
 
 /* Team column header */
 .team-col-hdr {
-    background: linear-gradient(135deg, #141c2e 0%, #1a2540 100%);
-    border: 1px solid #1e293b;
+    background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%);
+    border: 1px solid #e2e8f0;
     border-radius: 12px;
     padding: 14px 20px;
     margin-bottom: 12px;
     text-align: center;
+    box-shadow: 0 2px 4px -1px rgba(0, 0, 0, 0.05);
 }
 .team-col-hdr h3 {
-    color: #e2e8f0;
+    color: #1e293b;
     margin: 0;
     font-size: 1.15rem;
 }
 
 /* Palomo section */
 .palomo-section {
-    background: linear-gradient(135deg, #1a0f2e 0%, #0f1a2e 100%);
-    border: 1px solid #4c1d95;
+    background: linear-gradient(135deg, #f5f3ff 0%, #ede9fe 100%);
+    border: 1px solid #c4b5fd;
     border-radius: 16px;
     padding: 28px 32px;
     margin: 24px 0;
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
 }
 .palomo-section h3 {
-    color: #a78bfa;
+    color: #6d28d9;
     font-size: 1.3rem;
     margin-bottom: 16px;
 }
@@ -1120,10 +1124,10 @@ _CUSTOM_CSS = """
 /* Footer */
 .app-footer {
     text-align: center;
-    color: #334155;
+    color: #94a3b8;
     font-size: 0.72rem;
     padding: 24px 0 12px;
-    border-top: 1px solid #1e293b;
+    border-top: 1px solid #e2e8f0;
     margin-top: 32px;
 }
 
@@ -1139,9 +1143,9 @@ header [data-testid="stDecoration"] {display: none;}
 
 /* Scrollbar */
 ::-webkit-scrollbar { width: 6px; }
-::-webkit-scrollbar-track { background: #0a0f1a; }
-::-webkit-scrollbar-thumb { background: #1e293b; border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: #334155; }
+::-webkit-scrollbar-track { background: #f1f5f9; }
+::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
 </style>
 """
 
