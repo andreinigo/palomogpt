@@ -413,6 +413,8 @@ def _strip_markdown(text: str) -> str:
     text = _RE_MD_BOLD.sub(r'\1', text)
     text = _RE_MD_ITALIC.sub(r'\1', text)
     text = _RE_MD_HEADER.sub('', text)
+    # Strip bullet points to a simple angle bracket
+    text = re.sub(r'^\s*[-*]\s+', '> ', text, flags=re.MULTILINE)
     return text.strip()
 
 
@@ -433,18 +435,12 @@ def _clean_for_latin(text: str) -> str:
         '\U0001f3d9': '', '\U0001f30d': '',
         '\U0001f399': '', '\U0001f4da': '',
         '\U0001f46b': '', '\U0001f465': '',
+        '\n- ': '\n> ', '\n* ': '\n> ',  # Strip markdown bullet variants to >
     }
     for char, repl in replacements.items():
         text = text.replace(char, repl)
-    # Fallback: replace any remaining non-latin1 chars
-    cleaned = []
-    for ch in text:
-        try:
-            ch.encode('latin-1')
-            cleaned.append(ch)
-        except UnicodeEncodeError:
-            cleaned.append(' ')
-    return ''.join(cleaned)
+    # Fast fallback: replace any remaining non-latin1 chars
+    return text.encode('latin-1', errors='ignore').decode('latin-1')
 
 
 class _MatchPDF(FPDF):
@@ -607,7 +603,12 @@ def generate_match_pdf(config: dict, results: dict) -> bytes:
     pdf.add_team_histories(results)
     pdf.add_rosters(results)
     pdf.add_palomo_phrases(results)
-    return pdf.output()
+    # the fpdf output() sometimes returns a latin1 string instead of bytes,
+    # which causes Streamlit's download_button to crash when it tries to infer the mime type.
+    out = pdf.output()
+    if isinstance(out, str):
+        return out.encode('latin1')
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1443,6 +1444,14 @@ def _render_match_prep(api_key: str) -> None:
                     progress_cb=_progress,
                 )
                 st.session_state.match_results = results
+                status.update(label="📄 Generando archivo PDF...")
+                try:
+                    pdf_bytes = generate_match_pdf(st.session_state.match_config, results)
+                    st.session_state.match_pdf_bytes = pdf_bytes
+                except Exception as e:
+                    print(f"[MatchPrep] Error generating PDF:\n{traceback.format_exc()}")
+                    st.session_state.match_pdf_bytes = None
+
                 status.update(
                     label="✅ ¡Informe completo! Desplázate hacia abajo para verlo.",
                     state="complete",
@@ -1517,17 +1526,19 @@ def _display_match_results(config: dict, results: dict) -> None:
     )
 
     # ---- PDF download button ----
-    pdf_bytes = generate_match_pdf(config, results)
-    safe_home = re.sub(r'[^\w\s-]', '', home).strip().replace(' ', '_')
-    safe_away = re.sub(r'[^\w\s-]', '', away).strip().replace(' ', '_')
-    pdf_filename = f"Preparacion_{safe_home}_vs_{safe_away}.pdf"
-    st.download_button(
-        label="📥 Descargar PDF del Informe",
-        data=pdf_bytes,
-        file_name=pdf_filename,
-        mime="application/pdf",
-        use_container_width=True,
-    )
+    if st.session_state.get("match_pdf_bytes"):
+        safe_home = re.sub(r'[^\w\s-]', '', home).strip().replace(' ', '_')
+        safe_away = re.sub(r'[^\w\s-]', '', away).strip().replace(' ', '_')
+        pdf_filename = f"Preparacion_{safe_home}_vs_{safe_away}.pdf"
+        st.download_button(
+            label="📥 Descargar PDF del Informe",
+            data=st.session_state.match_pdf_bytes,
+            file_name=pdf_filename,
+            mime="application/pdf",
+            use_container_width=True,
+        )
+    else:
+        st.warning("⚠️ No se pudo generar el PDF en este momento. El informe completo se muestra a continuación.")
 
     # ---- Team Histories (side-by-side) ----
     st.markdown("### 📊 Historial de Temporadas")
