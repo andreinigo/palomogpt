@@ -605,10 +605,11 @@ def generate_match_pdf(config: dict, results: dict) -> bytes:
     pdf.add_palomo_phrases(results)
     # the fpdf output() sometimes returns a latin1 string instead of bytes,
     # which causes Streamlit's download_button to crash when it tries to infer the mime type.
+    # Additionally, fpdf2 returns a bytearray, which Streamlit also does not support.
     out = pdf.output()
     if isinstance(out, str):
         return out.encode('latin1')
-    return out
+    return bytes(out)
 
 
 # ---------------------------------------------------------------------------
