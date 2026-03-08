@@ -4,7 +4,7 @@
   1. PalomoGPT: unified conversational football intelligence with auto-router
   2. Preparación de Partidos: structured match preparation reports
 
-Powered by Perplexity Sonar Pro with real-time web search.
+Powered by Google Gemini with Google Search grounding.
 """
 from __future__ import annotations
 
@@ -16,36 +16,16 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import requests
 import streamlit as st
+from google import genai
+from google.genai import types
 from fpdf import FPDF
 from io import BytesIO
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-PERPLEXITY_API_BASE = "https://api.perplexity.ai"
-PERPLEXITY_MODEL = "sonar-pro"
-
-# Denylist domains to exclude garbage/irrelevant sources from Perplexity searches.
-# Uses `-` prefix per Perplexity API docs (denylist mode).
-_DENYLIST_DOMAINS = [
-    "-quillbot.com", "-scribbr.com", "-languagetool.org",
-    "-evolvemind.com", "-correctoronline.es", "-rebiun.org",
-    "-pinterest.com", "-tiktok.com", "-instagram.com",
-    "-facebook.com", "-reddit.com",
-    "-taringa.net", "-yahoo.com/answers",
-    "-ehow.com", "-wikihow.com",
-]
-
-# Allowlist of elite football data sources for verification/fact-checking passes.
-# No `-` prefix = allowlist mode (ONLY these domains).
-_ALLOWLIST_DOMAINS = [
-    "fbref.com", "statmuse.com", "theanalyst.com",
-    "soccerassociation.com", "olympedia.org",
-    "wikipedia.org", "transfermarkt.com",
-    "uefa.com", "fifa.com",
-]
+GEMINI_MODEL = "gemini-3.1-pro-preview"
 
 MODE_PALOMO_GPT = "palomo_gpt"
 MODE_MATCH_PREP = "match_prep"
@@ -183,21 +163,20 @@ En AMBOS casos:
 
 # --- Prompt Enhancer ---
 
-_PROMPT_ENHANCER_SYSTEM = """Eres un experto en fútbol que REFORMULA preguntas para mejorar búsquedas web.
+_PROMPT_ENHANCER_SYSTEM = """You are a football/soccer expert who reformulates search queries for the web.
 
-ENTRADA: Una pregunta del usuario sobre fútbol.
-SALIDA: UNA SOLA oración reformulada, más precisa y buscable. Nada más.
+INPUT: A user question about football (may be in any language).
+OUTPUT: ONE reformulated search query IN ENGLISH optimized for web search. Nothing else.
 
-REGLAS ABSOLUTAS:
-- JAMÁS hagas preguntas de vuelta. JAMÁS pidas aclaraciones. JAMÁS ofrezcas alternativas.
-- NO preguntes "¿te refieres a...?" ni "¿prefieres...?". Solo REFORMULA.
-- Haz tu MEJOR interpretación con sentido común futbolístico y produce la pregunta mejorada.
-- Expande jerga: "DTs gringos" → "directores técnicos nacidos en Estados Unidos"
-- Nombra competiciones relevantes explícitamente.
-- "copas domésticas" para personas de país X = competiciones de ESE país de origen.
-  Ejemplo: Para DTs de EEUU, "domésticas" = MLS Cup, US Open Cup.
-  Copa del Rey, DFB Pokal, Copa de Austria = copas EXTRANJERAS, SÍ incluirlas.
-- Máximo 2 oraciones. Solo la pregunta reformulada, CERO texto adicional.
+ABSOLUTE RULES:
+- ALWAYS output in ENGLISH regardless of input language (most football databases are in English).
+- NEVER ask questions back. NEVER offer alternatives. Just REFORMULATE.
+- Expand slang: "DTs gringos" → "American-born head coaches / managers"
+- Name specific competitions explicitly.
+- "domestic cups" for people from country X = competitions of THAT country of origin.
+  Example: For US coaches, "domestic" = MLS Cup, US Open Cup.
+  Copa del Rey, DFB Pokal, Austrian Cup = FOREIGN cups, DO include them.
+- Maximum 2 sentences. Only the reformulated query, ZERO additional text.
 """
 
 # --- Verification / Fact Checker Prompts ---
@@ -219,7 +198,10 @@ CHECKLIST DE VERIFICACIÓN OBLIGATORIA (las áreas donde más se inventan datos)
 ☑ Estadísticas exactas (goles, asistencias, partidos) → ¿Coinciden con las fuentes?
 ☑ Fechas y años → ¿Es el año correcto?
 ☑ Datos personales (esposa, hijos, profesión familiar) → Si no hay fuente clara, ELIMINAR.
+Ante el mínimo asomo de alucinación, borra esa viñeta del documento.
 """
+
+# --- Fact Checker Prompts (Match Prep only) ---
 
 _MATCH_VALIDATION_PROMPT = """Eres un validador de partidos de fútbol. El usuario quiere preparar \
 un informe para un partido. Tu MISIÓN es verificar que los equipos y el partido sean reales.
@@ -465,7 +447,7 @@ def _resolve_inline_citations(
 ) -> str:
     """Replace [N] citation markers in text with superscript markdown links.
 
-    Perplexity returns inline markers like [1], [3] that are 1-indexed into
+    Gemini returns inline markers like [1], [3] that are 1-indexed into
     the search_results list.  We convert each to a clickable superscript:
       [3] -> [³](url)
     so they render as small linked numbers in markdown.
@@ -737,91 +719,64 @@ def generate_match_pdf(config: dict, results: dict) -> bytes:
 
 
 # ---------------------------------------------------------------------------
-# Chat history builder (for PalomoGPT)
+# Gemini API
 # ---------------------------------------------------------------------------
-def _build_chat_messages(
-    messages: list[dict],
-    max_turns: int = 20,
-) -> list[dict]:
-    """Convert session messages into API format, stripping citations."""
-    msgs_to_process = list(messages)
-    if msgs_to_process and msgs_to_process[-1].get("role") == "user":
-        msgs_to_process = msgs_to_process[:-1]
-
-    history: list[dict] = []
-    prev_role = None
-    for msg in msgs_to_process:
-        role = msg.get("role", "user")
-        content = msg.get("content", "")
-        if not content:
-            continue
-        if role == "assistant" and _CITATION_SEPARATOR in content:
-            content = content[: content.index(_CITATION_SEPARATOR)]
-        if role == prev_role and history:
-            history[-1]["content"] += "\n\n" + content
-        else:
-            history.append({"role": role, "content": content})
-            prev_role = role
-
-    while history and history[0].get("role") != "user":
-        history.pop(0)
-
-    return history[-max_turns:]
-
-
-# ---------------------------------------------------------------------------
-# Perplexity API
-# ---------------------------------------------------------------------------
-def _perplexity_request(
+def _gemini_request(
     api_key: str,
-    messages: list[dict],
-    model: str = PERPLEXITY_MODEL,
+    system_prompt: str,
+    user_message: str,
+    history: Optional[List[types.Content]] = None,
     timeout: int = 120,
-    search_domain_filter: Optional[List[str]] = None,
+    use_search: bool = True,
 ) -> Tuple[str, List[Dict[str, str]]]:
     """
-    Non-streaming request to Perplexity Sonar Pro.
+    Request to Gemini with optional Google Search grounding.
     Returns (response_text, sources).
     """
-    web_search_options: Dict[str, Any] = {"search_type": "auto"}
-    if search_domain_filter:
-        web_search_options["search_domain_filter"] = search_domain_filter
+    client = genai.Client(api_key=api_key)
 
-    resp = requests.post(
-        f"{PERPLEXITY_API_BASE}/chat/completions",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": model,
-            "messages": messages,
-            "web_search_options": web_search_options,
-        },
-        timeout=timeout,
+    tools = []
+    if use_search:
+        tools.append(types.Tool(google_search=types.GoogleSearch()))
+
+    config = types.GenerateContentConfig(
+        system_instruction=system_prompt,
+        tools=tools,
+        thinking_config=types.ThinkingConfig(thinking_level="HIGH"),
     )
 
-    if resp.status_code >= 400:
-        detail = ""
-        try:
-            detail = resp.json().get("error", {}).get("message", "")
-        except Exception:
-            detail = resp.text[:300]
-        raise RuntimeError(f"Perplexity API error ({resp.status_code}): {detail}")
+    contents = []
+    if history:
+        contents.extend(history)
+    contents.append(
+        types.Content(
+            role="user",
+            parts=[types.Part.from_text(text=user_message)],
+        )
+    )
 
-    data = resp.json()
-    text = data["choices"][0]["message"]["content"]
+    response = client.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=contents,
+        config=config,
+    )
 
+    text = response.text or ""
+
+    # Extract sources from grounding metadata
     sources: List[Dict[str, str]] = []
-    for sr in data.get("search_results", []):
-        sources.append({
-            "title": sr.get("title", ""),
-            "url": sr.get("url", ""),
-            "snippet": sr.get("snippet", ""),
-        })
-    if not sources:
-        for url in data.get("citations", []):
-            sources.append({"title": "", "url": url, "snippet": ""})
+    try:
+        candidate = response.candidates[0]
+        if candidate.grounding_metadata and candidate.grounding_metadata.grounding_chunks:
+            for chunk in candidate.grounding_metadata.grounding_chunks:
+                if chunk.web:
+                    sources.append({
+                        "title": chunk.web.title or "",
+                        "url": chunk.web.uri or "",
+                        "snippet": "",
+                    })
+    except (AttributeError, IndexError):
+        pass
 
     # Resolve inline [N] markers into clickable superscript links
     text = _resolve_inline_citations(text, sources)
@@ -837,100 +792,38 @@ def get_palomo_response(
     session_messages: list[dict],
     api_key: str,
 ) -> Tuple[str, List[Dict[str, str]], List[str]]:
-    """Get a response from PalomoGPT with always-on verification pass.
+    """Get a response from PalomoGPT with Google Search grounding.
     Returns (response_text, sources, reasoning_chain).
     """
-    chat_msgs = _build_chat_messages(session_messages)
+    # Build conversation history for Gemini
+    history: List[types.Content] = []
+    for msg in session_messages[:-1]:  # exclude most recent user msg
+        role = "user" if msg["role"] == "user" else "model"
+        content = msg.get("content", "")
+        if content and not content.startswith("🧠"):  # skip reasoning messages
+            history.append(
+                types.Content(
+                    role=role,
+                    parts=[types.Part.from_text(text=content)],
+                )
+            )
+
     reasoning: List[str] = []
 
-    # === Step 0: Enhance the user's query using reasoning model ===
-    try:
-        enhance_msgs = [
-            {"role": "system", "content": _PROMPT_ENHANCER_SYSTEM},
-            {"role": "user", "content": query},
-        ]
-        enhanced_query, _ = _perplexity_request(
-            api_key, enhance_msgs, timeout=30, model="sonar-reasoning-pro"
-        )
-        enhanced_query = enhanced_query.strip()
-        # Guard: reject if the model asked a clarifying question instead of reformulating
-        _is_clarifying = any(p in enhanced_query.lower() for p in [
-            "¿prefieres", "¿te refieres", "¿o se trata", "¿quieres decir",
-            "prefieres preguntar", "no está claro",
-        ])
-        # Guard: only use if reasonable and not a clarifying question
-        if not _is_clarifying and len(enhanced_query) > 10 and len(enhanced_query) < len(query) * 10:
-            print(f"[QA Enhancer] '{query}' => '{enhanced_query}'")
-            search_query = enhanced_query
-            reasoning.append(
-                f"🔍 **Pregunta optimizada** (modelo: `sonar-reasoning-pro`):\n\n"
-                f"> {enhanced_query}\n\n"
-                f"<details><summary>Prompt del optimizador</summary>\n\n"
-                f"```\n{_PROMPT_ENHANCER_SYSTEM.strip()}\n```\n</details>"
-            )
-        else:
-            search_query = query
-            reasoning.append("🔍 **Pregunta:** Se usó la pregunta original sin modificaciones.")
-    except Exception as e:
-        print(f"[QA Enhancer] Failed, using original query: {e}")
-        search_query = query
-        reasoning.append(f"🔍 **Pregunta:** Se usó la pregunta original. Error del optimizador: `{e}`")
+    # Single pass: Gemini + Google Search grounding
+    text, sources = _gemini_request(
+        api_key=api_key,
+        system_prompt=_PALOMO_GPT_SYSTEM,
+        user_message=query,
+        history=history if history else None,
+    )
 
-    # === Pass 1: Broad search with enhanced query ===
-    api_messages = [
-        {"role": "system", "content": _PALOMO_GPT_SYSTEM},
-        *chat_msgs,
-        {"role": "user", "content": search_query},
-    ]
-    text, sources = _perplexity_request(api_key, api_messages)
+    source_titles = [s.get("title", "?") for s in sources[:10]]
     reasoning.append(
-        f"🎯 **Búsqueda principal** (modelo: `{PERPLEXITY_MODEL}`):\n\n"
-        f"- Query enviada: *\"{search_query}\"*\n"
-        f"- Fuentes obtenidas: {len(sources)}\n\n"
-        f"<details><summary>System prompt de PalomoGPT (primeras 300 chars)</summary>\n\n"
-        f"```\n{_PALOMO_GPT_SYSTEM[:300]}...\n```\n</details>"
+        f"🎯 **Búsqueda** (modelo: `{GEMINI_MODEL}` + Google Search):\n\n"
+        f"- Fuentes obtenidas: {len(sources)}\n"
+        f"- Top fuentes: {', '.join(source_titles) if source_titles else 'ninguna'}\n"
     )
-
-    # === Pass 2: Verification ===
-    verify_user_content = (
-        f"La pregunta original del usuario fue: \"{query}\"\n\n"
-        f"Este es el borrador de respuesta sobre fútbol que debes verificar. "
-        f"Busca si los datos, estadísticas, títulos y fechas son correctos:\n\n"
-        f"{text}"
-    )
-    verify_msgs = [
-        {"role": "system", "content": _VERIFY_RESPONSE_PROMPT},
-        {"role": "user", "content": verify_user_content},
-    ]
-    try:
-        verified_text, extra_sources = _perplexity_request(
-            api_key, verify_msgs, timeout=90,
-            search_domain_filter=_ALLOWLIST_DOMAINS,
-        )
-        # Guard: only accept if the verifier returned substantial text
-        if len(verified_text) > len(text) * 0.3:
-            text = verified_text
-            # Merge new sources
-            existing_urls = {s.get("url") for s in sources if s.get("url")}
-            new_count = 0
-            for s in extra_sources:
-                if s.get("url") and s["url"] not in existing_urls:
-                    sources.append(s)
-                    existing_urls.add(s["url"])
-                    new_count += 1
-            domains_str = ", ".join(_ALLOWLIST_DOMAINS)
-            reasoning.append(
-                f"✅ **Verificación completada** (modelo: `{PERPLEXITY_MODEL}`):\n\n"
-                f"- Dominios permitidos: `{domains_str}`\n"
-                f"- Fuentes nuevas de verificación: {new_count}\n\n"
-                f"<details><summary>Prompt del verificador</summary>\n\n"
-                f"```\n{_VERIFY_RESPONSE_PROMPT.strip()}\n```\n</details>"
-            )
-        else:
-            reasoning.append("⚠️ **Verificación:** El verificador no devolvió contenido suficiente. Se usó la respuesta original.")
-    except Exception as e:
-        print(f"[QA Verify] Verification pass failed, using original: {e}")
-        reasoning.append(f"⚠️ **Verificación omitida:** `{e}`")
 
     return text, sources, reasoning
 
@@ -955,19 +848,16 @@ def _research_team_history(
         current_date=CURRENT_DATE,
     )
 
-    messages = [
-        {"role": "system", "content": prompt},
-        {
-            "role": "user",
-            "content": (
-                f"Investiga las últimas 2 temporadas completas de {team_name}. "
-                f"Temporadas {season_prev}/{season_curr} y {season_curr}/{season_next}. "
-                "Sé exhaustivo con cada competición — especialmente en competiciones europeas "
-                "donde necesito CADA partido con resultado y goleadores."
-            ),
-        },
-    ]
-    return _perplexity_request(api_key, messages, timeout=180)
+    return _gemini_request(
+        api_key=api_key,
+        system_prompt=prompt,
+        user_message=(
+            f"Investiga las últimas 2 temporadas completas de {team_name}. "
+            f"Temporadas {season_prev}/{season_curr} y {season_curr}/{season_next}. "
+            "Sé exhaustivo con cada competición — especialmente en competiciones europeas "
+            "donde necesito CADA partido con resultado y goleadores."
+        ),
+    )
 
 
 def _fetch_player_list(
@@ -985,17 +875,14 @@ def _fetch_player_list(
         current_date=CURRENT_DATE,
     )
 
-    messages = [
-        {"role": "system", "content": prompt},
-        {
-            "role": "user",
-            "content": (
-                f"Dame la plantilla completa actual de {team_name} para la temporada "
-                f"{season_curr}/{season_next}. Solo el JSON, nada más."
-            ),
-        },
-    ]
-    text, _ = _perplexity_request(api_key, messages, timeout=60)
+    text, _ = _gemini_request(
+        api_key=api_key,
+        system_prompt=prompt,
+        user_message=(
+            f"Dame la plantilla completa actual de {team_name} para la temporada "
+            f"{season_curr}/{season_next}. Solo el JSON, nada más."
+        ),
+    )
 
     # Extract JSON from response (may have markdown fences)
     json_match = re.search(r'\{[\s\S]*\}', text)
@@ -1034,32 +921,23 @@ def _research_single_player(
         current_date=CURRENT_DATE,
     )
 
-    messages = [
-        {"role": "system", "content": prompt},
-        {
-            "role": "user",
-            "content": (
-                f"Dame el dossier COMPLETO de {player_name} ({pos_label}) de {team_name}. "
-                f"El próximo rival es {opponent_name} — busca TODAS las conexiones posibles. "
-                "Incluye biografía, trayectoria, vida personal, datos curiosos, "
-                "estadísticas de esta temporada, y situación contractual."
-            ),
-        },
-    ]
-    text, sources = _perplexity_request(api_key, messages, timeout=120)
+    text, sources = _gemini_request(
+        api_key=api_key,
+        system_prompt=prompt,
+        user_message=(
+            f"Dame el dossier COMPLETO de {player_name} ({pos_label}) de {team_name}. "
+            f"El próximo rival es {opponent_name} — busca TODAS las conexiones posibles. "
+            "Incluye biografía, trayectoria, vida personal, datos curiosos, "
+            "estadísticas de esta temporada, y situación contractual."
+        ),
+    )
 
     # Secondary Fact Checking Layer (authoritative verification via web search)
-    fact_check_msgs = [
-        {"role": "system", "content": _FACT_CHECK_PROMPT_PLAYER},
-        {
-            "role": "user", 
-            "content": f"Audita este dossier. Verifica cada dato contra fuentes confiables. Elimina lo no verificable:\n\n{text}"
-        }
-    ]
     try:
-        clean_text, _ = _perplexity_request(
-            api_key, fact_check_msgs, timeout=60,
-            search_domain_filter=_ALLOWLIST_DOMAINS,
+        clean_text, _ = _gemini_request(
+            api_key=api_key,
+            system_prompt=_FACT_CHECK_PROMPT_PLAYER,
+            user_message=f"Audita este dossier. Verifica cada dato contra fuentes confiables. Elimina lo no verificable:\n\n{text}",
         )
         # Guard: only accept if verifier returned substantial content
         if len(clean_text) > len(text) * 0.3:
@@ -1157,20 +1035,17 @@ def _research_palomo_phrases(
         current_date=CURRENT_DATE,
     )
 
-    messages = [
-        {"role": "system", "content": prompt},
-        {
-            "role": "user",
-            "content": (
-                f"Genera las frases de Fernando Palomo para la transmisión de "
-                f"{home_team} vs {away_team}, {match_type} de {tournament} en {stadium}. "
-                "Factor WOW al máximo. Quiero datos que nadie más tendría. "
-                "Incluye apertura, contexto de ambos equipos, head-to-head, "
-                "datos obscuros, y frases para distintos escenarios del partido."
-            ),
-        },
-    ]
-    return _perplexity_request(api_key, messages, timeout=180)
+    return _gemini_request(
+        api_key=api_key,
+        system_prompt=prompt,
+        user_message=(
+            f"Genera las frases de Fernando Palomo para la transmisión de "
+            f"{home_team} vs {away_team}, {match_type} de {tournament} en {stadium}. "
+            "Factor WOW al máximo. Quiero datos que nadie más tendría. "
+            "Incluye apertura, contexto de ambos equipos, head-to-head, "
+            "datos obscuros, y frases para distintos escenarios del partido."
+        ),
+    )
 
 
 def run_match_preparation(
@@ -1415,7 +1290,7 @@ def main() -> None:
 
     st.markdown(_CUSTOM_CSS, unsafe_allow_html=True)
 
-    api_key = st.secrets.get("PERPLEXITY_API_KEY", "")
+    api_key = st.secrets.get("GEMINI_API_KEY", "")
 
     # ---- Sidebar ----
     with st.sidebar:
@@ -1466,7 +1341,7 @@ def main() -> None:
                 st.rerun()
 
         st.markdown(
-            '<div class="app-footer">PalomoFacts v4 · AI: Perplexity Sonar Pro</div>',
+            '<div class="app-footer">PalomoFacts v4 · AI: Google Gemini + Search Grounding</div>',
             unsafe_allow_html=True,
         )
 
@@ -1550,8 +1425,8 @@ def _render_palomo_gpt(api_key: str) -> None:
     if not api_key:
         with st.chat_message("assistant"):
             err = (
-                "⚠️ No se encontró la API key de Perplexity. "
-                "Configura `PERPLEXITY_API_KEY` en los secrets de Streamlit."
+                "⚠️ No se encontró la API key de Gemini. "
+                "Configura `GEMINI_API_KEY` en los secrets de Streamlit."
             )
             st.warning(err)
             msgs.append({"role": "assistant", "content": err})
@@ -1656,8 +1531,8 @@ def _render_match_prep(api_key: str) -> None:
     ):
         if not api_key:
             st.error(
-                "⚠️ No se encontró la API key de Perplexity. "
-                "Configura `PERPLEXITY_API_KEY` en los secrets de Streamlit."
+                "⚠️ No se encontró la API key de Gemini. "
+                "Configura `GEMINI_API_KEY` en los secrets de Streamlit."
             )
             return
 
@@ -1670,11 +1545,11 @@ def _render_match_prep(api_key: str) -> None:
                     tournament=tournament,
                     current_date=CURRENT_DATE,
                 )
-                val_msgs = [
-                    {"role": "system", "content": val_prompt},
-                    {"role": "user", "content": "Valida este partido y devuelve el JSON."},
-                ]
-                val_text, _ = _perplexity_request(api_key, val_msgs, timeout=30)
+                val_text, _ = _gemini_request(
+                    api_key=api_key,
+                    system_prompt=val_prompt,
+                    user_message="Valida este partido y devuelve el JSON.",
+                )
 
                 # Parse JSON from response
                 json_match = re.search(r'\{[\s\S]*\}', val_text)
