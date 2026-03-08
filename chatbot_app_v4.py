@@ -192,7 +192,11 @@ REGLAS:
 1. Expande abreviaturas y jerga: "DTs gringos" → "directores técnicos nacidos en Estados Unidos"
 2. Añade contexto específico: Nombra las competiciones relevantes (DFB Pokal, Copa del Rey, FA Cup, etc.)
 3. Añade rango temporal si falta: "en los últimos años" → "entre 2015 y 2026"
-4. Resuelve ambigüedades: "copas en Europa" → "copas nacionales domésticas en las ligas top-5 europeas"
+4. Resuelve ambigüedades con sentido común futbolístico:
+   - "copas domésticas" cuando habla de un país específico = las copas de ESE país
+   - "exceptuando copas domésticas" sin país = las copas del país de origen del sujeto
+   - Ejemplo: si pregunta sobre DTs de EEUU y dice "excepto copas domésticas", se refiere a \
+     excepto MLS Cup, US Open Cup, y otras copas estadounidenses. NO excluir Copa del Rey, DFB Pokal, etc.
 5. Pide específicamente los datos que se necesitarían para responder bien: resultados, fechas, equipos.
 6. NO respondas la pregunta. SOLO devuelve la versión mejorada de la pregunta.
 7. Mantén el idioma original del usuario.
@@ -842,26 +846,33 @@ def get_palomo_response(
     chat_msgs = _build_chat_messages(session_messages)
     reasoning: List[str] = []
 
-    # === Step 0: Enhance the user's query for better search results ===
+    # === Step 0: Enhance the user's query using reasoning model ===
     try:
         enhance_msgs = [
             {"role": "system", "content": _PROMPT_ENHANCER_SYSTEM},
             {"role": "user", "content": query},
         ]
-        enhanced_query, _ = _perplexity_request(api_key, enhance_msgs, timeout=20)
+        enhanced_query, _ = _perplexity_request(
+            api_key, enhance_msgs, timeout=30, model="sonar-reasoning"
+        )
         enhanced_query = enhanced_query.strip()
         # Guard: only use if the enhancer returned something reasonable
         if len(enhanced_query) > 10 and len(enhanced_query) < len(query) * 10:
             print(f"[QA Enhancer] '{query}' => '{enhanced_query}'")
             search_query = enhanced_query
-            reasoning.append(f"🔍 **Pregunta optimizada:** {enhanced_query}")
+            reasoning.append(
+                f"🔍 **Pregunta optimizada** (modelo: `sonar-reasoning`):\n\n"
+                f"> {enhanced_query}\n\n"
+                f"<details><summary>Prompt del optimizador</summary>\n\n"
+                f"```\n{_PROMPT_ENHANCER_SYSTEM.strip()}\n```\n</details>"
+            )
         else:
             search_query = query
             reasoning.append("🔍 **Pregunta:** Se usó la pregunta original sin modificaciones.")
     except Exception as e:
         print(f"[QA Enhancer] Failed, using original query: {e}")
         search_query = query
-        reasoning.append("🔍 **Pregunta:** Se usó la pregunta original (optimizador no disponible).")
+        reasoning.append(f"🔍 **Pregunta:** Se usó la pregunta original. Error del optimizador: `{e}`")
 
     # === Pass 1: Broad search with enhanced query ===
     api_messages = [
@@ -870,22 +881,24 @@ def get_palomo_response(
         {"role": "user", "content": search_query},
     ]
     text, sources = _perplexity_request(api_key, api_messages)
-    reasoning.append(f"🎯 **Búsqueda principal:** Se generaron {len(sources)} fuentes en la búsqueda inicial.")
+    reasoning.append(
+        f"🎯 **Búsqueda principal** (modelo: `{PERPLEXITY_MODEL}`):\n\n"
+        f"- Query enviada: *\"{search_query}\"*\n"
+        f"- Fuentes obtenidas: {len(sources)}\n\n"
+        f"<details><summary>System prompt de PalomoGPT (primeras 300 chars)</summary>\n\n"
+        f"```\n{_PALOMO_GPT_SYSTEM[:300]}...\n```\n</details>"
+    )
 
     # === Pass 2: Verification ===
-    # KEY: Put the draft in the USER message so Perplexity's search engine
-    # can see the football names/claims and search for them specifically.
+    verify_user_content = (
+        f"La pregunta original del usuario fue: \"{query}\"\n\n"
+        f"Este es el borrador de respuesta sobre fútbol que debes verificar. "
+        f"Busca si los datos, estadísticas, títulos y fechas son correctos:\n\n"
+        f"{text}"
+    )
     verify_msgs = [
         {"role": "system", "content": _VERIFY_RESPONSE_PROMPT},
-        {
-            "role": "user",
-            "content": (
-                f"La pregunta original del usuario fue: \"{query}\"\n\n"
-                f"Este es el borrador de respuesta sobre fútbol que debes verificar. "
-                f"Busca si los datos, estadísticas, títulos y fechas son correctos:\n\n"
-                f"{text}"
-            ),
-        },
+        {"role": "user", "content": verify_user_content},
     ]
     try:
         verified_text, extra_sources = _perplexity_request(
@@ -903,16 +916,19 @@ def get_palomo_response(
                     sources.append(s)
                     existing_urls.add(s["url"])
                     new_count += 1
-            domains_used = ", ".join(_ALLOWLIST_DOMAINS[:5]) + "..."
+            domains_str = ", ".join(_ALLOWLIST_DOMAINS)
             reasoning.append(
-                f"✅ **Verificación completada:** Datos cruzados contra fuentes elite "
-                f"({domains_used}). Se añadieron {new_count} fuente(s) de verificación."
+                f"✅ **Verificación completada** (modelo: `{PERPLEXITY_MODEL}`):\n\n"
+                f"- Dominios permitidos: `{domains_str}`\n"
+                f"- Fuentes nuevas de verificación: {new_count}\n\n"
+                f"<details><summary>Prompt del verificador</summary>\n\n"
+                f"```\n{_VERIFY_RESPONSE_PROMPT.strip()}\n```\n</details>"
             )
         else:
             reasoning.append("⚠️ **Verificación:** El verificador no devolvió contenido suficiente. Se usó la respuesta original.")
     except Exception as e:
         print(f"[QA Verify] Verification pass failed, using original: {e}")
-        reasoning.append(f"⚠️ **Verificación omitida:** {e}")
+        reasoning.append(f"⚠️ **Verificación omitida:** `{e}`")
 
     return text, sources, reasoning
 
