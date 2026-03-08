@@ -1560,11 +1560,12 @@ def _render_palomo_gpt(api_key: str) -> None:
             st.markdown(full_response)
             msgs.append({"role": "assistant", "content": full_response})
 
-            # Show reasoning chain
+            # Show reasoning chain as follow-up messages
             if reasoning_chain:
-                with st.expander("🧠 Cadena de razonamiento", expanded=False):
-                    for step in reasoning_chain:
-                        st.markdown(step)
+                chain_text = "🧠 **Cadena de razonamiento:**\n\n" + "\n\n".join(reasoning_chain)
+                with st.chat_message("assistant"):
+                    st.markdown(chain_text)
+                msgs.append({"role": "assistant", "content": chain_text})
 
         except Exception as e:
             err_msg = f"❌ Error: {e}"
