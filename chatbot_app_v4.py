@@ -141,6 +141,33 @@ En AMBOS casos:
 - Formato limpio en markdown, texto natural. Sin relleno ni JSON.
 """.strip()
 
+# --- Evaluator / Fact Checker Prompts ---
+
+_EVALUATOR_PROMPT_QA = """Eres un motor de razonamiento lógico. Tu tarea es evaluar una \
+respuesta que acaba de dar un modelo de IA a una pregunta de un usuario, y determinar \
+si la IA admitió que NO pudo encontrar la información solicitada o que la información \
+está incompleta.
+
+PREGUNTA DEL USUARIO: "{query}"
+
+RESPUESTA DE LA IA:
+{response}
+
+INSTRUCCIÓN:
+Evalúa estrictamente si la respuesta indica algo como "no hay información", "no pude encontrar", \
+o si omite flagrantemente el núcleo de lo que se preguntó porque le falta contexto.
+Si la IA respondió satisfactoriamente con la información, devuelve exactamente esto (sin comillas): "COMPLETO"
+Si falta información específica o la IA se rindió, devuelve una instrucción directa de 1 línea \
+sobre qué dato EXACTO hay que buscar ahora para completar la respuesta.
+
+DIFERENCIA CLAVE: Si la IA dice que "no hay información" sobre algo que históricamente SÍ pasó \
+o es un dato real, devuelve la instrucción de búsqueda.
+EJEMPLO 1: "COMPLETO"
+EJEMPLO 2: "Busca exactamente: Fecha de la lesión de rodilla de Ronaldo en 1999"
+EJEMPLO 3: "Busca exactamente: Profesión de la esposa actual de X jugador"
+
+Tu salida ÚNICAMENTE debe ser "COMPLETO" o la frase de búsqueda corta. Cero bla bla.
+"""
 
 # --- Match Preparation prompts ---
 
@@ -278,6 +305,24 @@ Responde en español. Sé EXHAUSTIVO y PRECISO — NO inventes datos. \
 Si no encuentras un dato específico, omítelo, pero BUSCA A FONDO antes de rendirte.
 FECHA ACTUAL: {current_date}."""
 
+
+_FACT_CHECK_PROMPT_PLAYER = """Eres el Auditor Principal de Datos de ESPN y el filtro definitivo de la verdad.
+Tu misión es someter el siguiente dossier de un jugax-dor a un riguroso proceso de FACT-CHECKING.
+
+PREMISA CRÍTICA: Los modelos de IA suelen alucinar detalles hiper-específicos (nombres de esposas, profesiones de cónyuges, anécdotas falsas de juveniles, estadísticas exactas, fechas de debut, montos de transferencias, historias inventadas con el rival).
+
+TU TRABAJO COMO AUDITOR IMPLACABLE:
+1. IDENTIFICA cada afirmación de la lista original.
+2. VERIFICA con todo tu poder de búsqueda si esos datos (especialmente la parte de vida personal, hijos, esposa y sus empleos, historias familiares, hobbies inventados o records cuestionables) son 100% ciertos.
+3. ELIMINA SIN PIEDAD cualquier dato personal, chisme o historia emotiva inventada si no puedes verificarlo en fuentes públicas confiables. (ej. Trabajos de esposas, historias de pobreza exageradas, declaraciones falsas al rival). Si dice que a la esposa le gusta "cocinar" o "estudiar" suele ser alucinación.
+4. CORRIGE cualquier dato futbolístico objetivo que sea incorrecto (ej. si dice que debutó en 2020 pero fue en 2018, pon 2018. Si las estadísticas están mal, pon las correctas).
+
+REGLA DE ORO DE PUBLICACIÓN: Es 1000 veces mejor OMITIR información personal que publicar una MENTIRA. Ante el mínimo asomo de alucinación, borra esa viñeta del documento.
+
+SALIDA REQUERIDA:
+Devuelve ÚNICAMENTE el dossier limpio y verificado. Mantén la misma estructura Markdown y estilo de narración de televisión original.
+NO TE DISCULPES, NO EXPLIQUES TUS CAMBIOS. SOLO ENTREGAME EL DOSSIER FINAL PERFECTO.
+"""
 
 _PALOMO_PHRASES_PROMPT = """Eres Fernando Palomo — EL narrador legendario de ESPN. \
 Estás preparando tus frases para la transmisión de un partido importante.
@@ -708,14 +753,58 @@ def get_palomo_response(
     session_messages: list[dict],
     api_key: str,
 ) -> Tuple[str, List[Dict[str, str]]]:
-    """Get a response from PalomoGPT with auto-routed depth."""
+    """Get a response from PalomoGPT with auto-routed depth and secondary fact-checking."""
     chat_msgs = _build_chat_messages(session_messages)
+    
+    # 1. Initial Pass
     api_messages = [
         {"role": "system", "content": _PALOMO_GPT_SYSTEM},
         *chat_msgs,
         {"role": "user", "content": query},
     ]
-    return _perplexity_request(api_key, api_messages)
+    text, sources = _perplexity_request(api_key, api_messages)
+
+    # 2. Evaluate if information was missing (Secondary Reasoning Layer)
+    eval_prompt = _EVALUATOR_PROMPT_QA.format(
+        query=query,
+        response=text
+    )
+    eval_msgs = [
+        {"role": "system", "content": eval_prompt},
+        {"role": "user", "content": "Evalúa la respuesta. Devuelve 'COMPLETO' o la nueva Búsqueda Exacta."}
+    ]
+    eval_result, _ = _perplexity_request(api_key, eval_msgs, timeout=30)
+    eval_result = eval_result.strip()
+
+    # 3. If information is missing, trigger Deep Search
+    if "COMPLETO" not in eval_result and len(eval_result) > 5:
+        print(f"[QA Deep Search Triggered] Missing info detected. New query: {eval_result}")
+        deep_system = (
+            f"{_PALOMO_GPT_SYSTEM}\n\n"
+            f"ALERTA IMPORTANTE: En el intento anterior no pudimos encontrar lo que "
+            f"el usuario quería. El usuario preguntó: '{query}'.\n"
+            f"AHORA DEBES BUSCAR ESTO ESTRICTAMENTE Y A PROFUNDIDAD: {eval_result}\n"
+            f"Integra este nuevo hallazgo con la respuesta inicial de forma natural."
+        )
+        deep_msgs = [
+            {"role": "system", "content": deep_system},
+            {"role": "assistant", "content": text}, # give it context of what it already said
+            {"role": "user", "content": "Por favor, busca exhaustivamente el dato que nos faltó e intégralo a la respuesta."}
+        ]
+        text_deep, sources_deep = _perplexity_request(api_key, deep_msgs, timeout=90)
+        
+        # Merge sources, removing duplicates
+        combined_sources = sources.copy()
+        existing_urls = {s.get("url") for s in combined_sources if s.get("url")}
+        for ds in sources_deep:
+            url = ds.get("url")
+            if url and url not in existing_urls:
+                combined_sources.append(ds)
+                existing_urls.add(url)
+                
+        return text_deep, combined_sources
+
+    return text, sources
 
 
 # ---------------------------------------------------------------------------
@@ -830,6 +919,23 @@ def _research_single_player(
         },
     ]
     text, sources = _perplexity_request(api_key, messages, timeout=120)
+
+    # Secondary Fact Checking Layer
+    fact_check_msgs = [
+        {"role": "system", "content": _FACT_CHECK_PROMPT_PLAYER},
+        {
+            "role": "user", 
+            "content": f"Por favor, revisa y censura este dossier eliminando cualquier dato personal no verificable o chisme:\n\n{text}"
+        }
+    ]
+    try:
+        clean_text, _ = _perplexity_request(api_key, fact_check_msgs, timeout=60)
+        # If the model didn't totally break the response formatting
+        if len(clean_text) > bool(len(text) * 0.5):
+            text = clean_text
+    except Exception as e:
+        print(f"[FactCheck] Error during player dossier fact check: {e}")
+
     return {
         "name": player_name,
         "position": position,
