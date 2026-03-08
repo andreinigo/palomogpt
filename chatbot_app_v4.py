@@ -109,6 +109,16 @@ jugadores (solo lo público y verificado), historia de clubes, táctica, transfe
 comparaciones, entrevistas citadas, la temporada actual \
 ({CURRENT_YEAR}/{CURRENT_YEAR + 1} o {CURRENT_YEAR - 1}/{CURRENT_YEAR} según la liga).
 
+FUENTES PRIORITARIAS PARA ESTADÍSTICAS Y FACT-CHECKING:
+- Para confirmar CUALQUIER estadística o dato histórico, prioriza buscar y extraer datos \
+  específicamente de estos dominios altamente confiables:
+  * fbref.com/en/
+  * www.statmuse.com/fc
+  * theanalyst.com/
+  * soccerassociation.com/
+  * www.olympedia.org/
+  * Wikipedia
+
 --- ROUTER AUTOMÁTICO ---
 
 Detecta automáticamente la intención del usuario y adapta tu respuesta:
@@ -141,32 +151,24 @@ En AMBOS casos:
 - Formato limpio en markdown, texto natural. Sin relleno ni JSON.
 """.strip()
 
-# --- Evaluator / Fact Checker Prompts ---
+# --- Verification / Fact Checker Prompts ---
 
-_EVALUATOR_PROMPT_QA = """Eres un motor de razonamiento lógico. Tu tarea es evaluar una \
-respuesta que acaba de dar un modelo de IA a una pregunta de un usuario, y determinar \
-si la IA admitió que NO pudo encontrar la información solicitada o que la información \
-está incompleta.
+_VERIFY_RESPONSE_PROMPT = """Eres un verificador de datos de élite para una transmisión deportiva de televisión.
+Se te entrega un BORRADOR de respuesta generado por IA sobre fútbol.
 
-PREGUNTA DEL USUARIO: "{query}"
+Tu MISIÓN:
+1. VERIFICA cada estadística, fecha, récord, y dato factual del borrador contra fuentes confiables.
+2. CORRIGE cualquier dato que encuentres incorrecto (ej. goles, fechas de debut, montos de transferencia).
+3. ELIMINA cualquier afirmación que no puedas verificar y que parezca inventada.
+4. MANTÉN el estilo, tono, y estructura narrativa del borrador original intactos.
 
-RESPUESTA DE LA IA:
+PREGUNTA ORIGINAL DEL USUARIO: "{query}"
+
+BORRADOR A VERIFICAR:
 {response}
 
-INSTRUCCIÓN:
-Evalúa estrictamente si la respuesta indica algo como "no hay información", "no pude encontrar", \
-o si omite flagrantemente el núcleo de lo que se preguntó porque le falta contexto.
-Si la IA respondió satisfactoriamente con la información, devuelve exactamente esto (sin comillas): "COMPLETO"
-Si falta información específica o la IA se rindió, devuelve una instrucción directa de 1 línea \
-sobre qué dato EXACTO hay que buscar ahora para completar la respuesta.
-
-DIFERENCIA CLAVE: Si la IA dice que "no hay información" sobre algo que históricamente SÍ pasó \
-o es un dato real, devuelve la instrucción de búsqueda.
-EJEMPLO 1: "COMPLETO"
-EJEMPLO 2: "Busca exactamente: Fecha de la lesión de rodilla de Ronaldo en 1999"
-EJEMPLO 3: "Busca exactamente: Profesión de la esposa actual de X jugador"
-
-Tu salida ÚNICAMENTE debe ser "COMPLETO" o la frase de búsqueda corta. Cero bla bla.
+Devuelve SOLAMENTE el texto verificado y corregido, con el mismo formato markdown.
+NO agregues notas, disculpas ni explicaciones sobre tus correcciones.
 """
 
 # --- Match Preparation prompts ---
@@ -307,7 +309,7 @@ FECHA ACTUAL: {current_date}."""
 
 
 _FACT_CHECK_PROMPT_PLAYER = """Eres el Auditor Principal de Datos de ESPN y el filtro definitivo de la verdad.
-Tu misión es someter el siguiente dossier de un jugax-dor a un riguroso proceso de FACT-CHECKING.
+Tu misión es someter el siguiente dossier de un jugador a un riguroso proceso de FACT-CHECKING.
 
 PREMISA CRÍTICA: Los modelos de IA suelen alucinar detalles hiper-específicos (nombres de esposas, profesiones de cónyuges, anécdotas falsas de juveniles, estadísticas exactas, fechas de debut, montos de transferencias, historias inventadas con el rival).
 
@@ -698,11 +700,16 @@ def _perplexity_request(
     messages: list[dict],
     model: str = PERPLEXITY_MODEL,
     timeout: int = 120,
+    search_domain_filter: Optional[List[str]] = None,
 ) -> Tuple[str, List[Dict[str, str]]]:
     """
     Non-streaming request to Perplexity Sonar Pro.
     Returns (response_text, sources).
     """
+    web_search_options: Dict[str, Any] = {"search_type": "auto"}
+    if search_domain_filter:
+        web_search_options["search_domain_filter"] = search_domain_filter
+
     resp = requests.post(
         f"{PERPLEXITY_API_BASE}/chat/completions",
         headers={
@@ -712,7 +719,7 @@ def _perplexity_request(
         json={
             "model": model,
             "messages": messages,
-            "web_search_options": {"search_type": "auto"},
+            "web_search_options": web_search_options,
         },
         timeout=timeout,
     )
@@ -753,10 +760,10 @@ def get_palomo_response(
     session_messages: list[dict],
     api_key: str,
 ) -> Tuple[str, List[Dict[str, str]]]:
-    """Get a response from PalomoGPT with auto-routed depth and secondary fact-checking."""
+    """Get a response from PalomoGPT with always-on verification pass."""
     chat_msgs = _build_chat_messages(session_messages)
-    
-    # 1. Initial Pass
+
+    # === Pass 1: Broad search (NO domain filter) ===
     api_messages = [
         {"role": "system", "content": _PALOMO_GPT_SYSTEM},
         *chat_msgs,
@@ -764,45 +771,35 @@ def get_palomo_response(
     ]
     text, sources = _perplexity_request(api_key, api_messages)
 
-    # 2. Evaluate if information was missing (Secondary Reasoning Layer)
-    eval_prompt = _EVALUATOR_PROMPT_QA.format(
-        query=query,
-        response=text
-    )
-    eval_msgs = [
-        {"role": "system", "content": eval_prompt},
-        {"role": "user", "content": "Evalúa la respuesta. Devuelve 'COMPLETO' o la nueva Búsqueda Exacta."}
+    # === Pass 2: Domain-filtered verification ===
+    _STATS_DOMAINS = [
+        "fbref.com", "statmuse.com", "theanalyst.com",
+        "soccerassociation.com", "olympedia.org", "wikipedia.org",
     ]
-    eval_result, _ = _perplexity_request(api_key, eval_msgs, timeout=30)
-    eval_result = eval_result.strip()
-
-    # 3. If information is missing, trigger Deep Search
-    if "COMPLETO" not in eval_result and len(eval_result) > 5:
-        print(f"[QA Deep Search Triggered] Missing info detected. New query: {eval_result}")
-        deep_system = (
-            f"{_PALOMO_GPT_SYSTEM}\n\n"
-            f"ALERTA IMPORTANTE: En el intento anterior no pudimos encontrar lo que "
-            f"el usuario quería. El usuario preguntó: '{query}'.\n"
-            f"AHORA DEBES BUSCAR ESTO ESTRICTAMENTE Y A PROFUNDIDAD: {eval_result}\n"
-            f"Integra este nuevo hallazgo con la respuesta inicial de forma natural."
+    verify_prompt = _VERIFY_RESPONSE_PROMPT.format(
+        query=query,
+        response=text,
+    )
+    verify_msgs = [
+        {"role": "system", "content": verify_prompt},
+        {"role": "user", "content": "Verifica y corrige el borrador. Devuelve solo el texto final."}
+    ]
+    try:
+        verified_text, extra_sources = _perplexity_request(
+            api_key, verify_msgs, timeout=90,
+            search_domain_filter=_STATS_DOMAINS,
         )
-        deep_msgs = [
-            {"role": "system", "content": deep_system},
-            {"role": "assistant", "content": text}, # give it context of what it already said
-            {"role": "user", "content": "Por favor, busca exhaustivamente el dato que nos faltó e intégralo a la respuesta."}
-        ]
-        text_deep, sources_deep = _perplexity_request(api_key, deep_msgs, timeout=90)
-        
-        # Merge sources, removing duplicates
-        combined_sources = sources.copy()
-        existing_urls = {s.get("url") for s in combined_sources if s.get("url")}
-        for ds in sources_deep:
-            url = ds.get("url")
-            if url and url not in existing_urls:
-                combined_sources.append(ds)
-                existing_urls.add(url)
-                
-        return text_deep, combined_sources
+        # Guard: only accept if the verifier returned substantial text
+        if len(verified_text) > len(text) * 0.3:
+            text = verified_text
+            # Merge new sources
+            existing_urls = {s.get("url") for s in sources if s.get("url")}
+            for s in extra_sources:
+                if s.get("url") and s["url"] not in existing_urls:
+                    sources.append(s)
+                    existing_urls.add(s["url"])
+    except Exception as e:
+        print(f"[QA Verify] Verification pass failed, using original: {e}")
 
     return text, sources
 
@@ -920,18 +917,25 @@ def _research_single_player(
     ]
     text, sources = _perplexity_request(api_key, messages, timeout=120)
 
-    # Secondary Fact Checking Layer
+    # Secondary Fact Checking Layer (domain-filtered for authoritative verification)
+    _STATS_DOMAINS = [
+        "fbref.com", "statmuse.com", "theanalyst.com",
+        "soccerassociation.com", "olympedia.org", "wikipedia.org",
+    ]
     fact_check_msgs = [
         {"role": "system", "content": _FACT_CHECK_PROMPT_PLAYER},
         {
             "role": "user", 
-            "content": f"Por favor, revisa y censura este dossier eliminando cualquier dato personal no verificable o chisme:\n\n{text}"
+            "content": f"Audita este dossier. Verifica cada dato contra fuentes confiables. Elimina lo no verificable:\n\n{text}"
         }
     ]
     try:
-        clean_text, _ = _perplexity_request(api_key, fact_check_msgs, timeout=60)
-        # If the model didn't totally break the response formatting
-        if len(clean_text) > bool(len(text) * 0.5):
+        clean_text, _ = _perplexity_request(
+            api_key, fact_check_msgs, timeout=60,
+            search_domain_filter=_STATS_DOMAINS,
+        )
+        # Guard: only accept if verifier returned substantial content
+        if len(clean_text) > len(text) * 0.3:
             text = clean_text
     except Exception as e:
         print(f"[FactCheck] Error during player dossier fact check: {e}")
