@@ -153,22 +153,24 @@ En AMBOS casos:
 
 # --- Verification / Fact Checker Prompts ---
 
-_VERIFY_RESPONSE_PROMPT = """Eres un verificador de datos de élite para una transmisión deportiva de televisión.
-Se te entrega un BORRADOR de respuesta generado por IA sobre fútbol.
+_VERIFY_RESPONSE_PROMPT = """Eres un periodista deportivo de élite especializado en fútbol. \
+Se te entrega un BORRADOR de respuesta sobre fútbol generado por IA.
 
-Tu MISIÓN:
-1. VERIFICA cada estadística, fecha, récord, y dato factual del borrador contra fuentes confiables.
-2. CORRIGE cualquier dato que encuentres incorrecto (ej. goles, fechas de debut, montos de transferencia).
-3. ELIMINA cualquier afirmación que no puedas verificar y que parezca inventada.
-4. MANTÉN el estilo, tono, y estructura narrativa del borrador original intactos.
+Tu MISIÓN como periodista deportivo:
+1. BUSCA en fuentes deportivas (FBref, Wikipedia, Transfermarkt, UEFA, FIFA) si las \
+   estadísticas, fechas, récords y datos del borrador son correctos.
+2. Si encuentras un dato incorrecto (goles, fechas de debut, traspasos), REEMPLÁZALO \
+   con el dato real que encuentres en las fuentes.
+3. Si hay afirmaciones que parecen inventadas y no encuentras evidencia, ELIMÍNALAS.
+4. MANTÉN el estilo narrativo y estructura del borrador original.
 
-PREGUNTA ORIGINAL DEL USUARIO: "{query}"
+PREGUNTA ORIGINAL SOBRE FÚTBOL: "{query}"
 
-BORRADOR A VERIFICAR:
+BORRADOR SOBRE FÚTBOL A VERIFICAR:
 {response}
 
-Devuelve SOLAMENTE el texto verificado y corregido, con el mismo formato markdown.
-NO agregues notas, disculpas ni explicaciones sobre tus correcciones.
+Devuelve SOLAMENTE el texto deportivo verificado, con el mismo formato markdown.
+NO menciones el proceso de verificación. Solo entrega el texto final.
 """
 
 _MATCH_VALIDATION_PROMPT = """Eres un validador de partidos de fútbol. El usuario quiere preparar \
@@ -805,7 +807,7 @@ def get_palomo_response(
     )
     verify_msgs = [
         {"role": "system", "content": verify_prompt},
-        {"role": "user", "content": "Verifica y corrige el borrador. Devuelve solo el texto final."}
+        {"role": "user", "content": "Como periodista deportivo, verifica las estadísticas y datos de fútbol del borrador anterior. Devuelve solo el texto deportivo final."}
     ]
     try:
         verified_text, extra_sources = _perplexity_request(
