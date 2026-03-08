@@ -27,6 +27,26 @@ from io import BytesIO
 PERPLEXITY_API_BASE = "https://api.perplexity.ai"
 PERPLEXITY_MODEL = "sonar-pro"
 
+# Denylist domains to exclude garbage/irrelevant sources from Perplexity searches.
+# Uses `-` prefix per Perplexity API docs (denylist mode).
+_DENYLIST_DOMAINS = [
+    "-quillbot.com", "-scribbr.com", "-languagetool.org",
+    "-evolvemind.com", "-correctoronline.es", "-rebiun.org",
+    "-pinterest.com", "-tiktok.com", "-instagram.com",
+    "-facebook.com", "-reddit.com",
+    "-taringa.net", "-yahoo.com/answers",
+    "-ehow.com", "-wikihow.com",
+]
+
+# Allowlist of elite football data sources for verification/fact-checking passes.
+# No `-` prefix = allowlist mode (ONLY these domains).
+_ALLOWLIST_DOMAINS = [
+    "fbref.com", "statmuse.com", "theanalyst.com",
+    "soccerassociation.com", "olympedia.org",
+    "wikipedia.org", "transfermarkt.com",
+    "uefa.com", "fifa.com",
+]
+
 MODE_PALOMO_GPT = "palomo_gpt"
 MODE_MATCH_PREP = "match_prep"
 
@@ -863,6 +883,7 @@ def get_palomo_response(
     try:
         verified_text, extra_sources = _perplexity_request(
             api_key, verify_msgs, timeout=90,
+            search_domain_filter=_ALLOWLIST_DOMAINS,
         )
         # Guard: only accept if the verifier returned substantial text
         if len(verified_text) > len(text) * 0.3:
@@ -1003,6 +1024,7 @@ def _research_single_player(
     try:
         clean_text, _ = _perplexity_request(
             api_key, fact_check_msgs, timeout=60,
+            search_domain_filter=_ALLOWLIST_DOMAINS,
         )
         # Guard: only accept if verifier returned substantial content
         if len(clean_text) > len(text) * 0.3:
