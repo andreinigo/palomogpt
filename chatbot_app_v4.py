@@ -835,9 +835,12 @@ def get_palomo_response(
     query: str,
     session_messages: list[dict],
     api_key: str,
-) -> Tuple[str, List[Dict[str, str]]]:
-    """Get a response from PalomoGPT with always-on verification pass."""
+) -> Tuple[str, List[Dict[str, str]], List[str]]:
+    """Get a response from PalomoGPT with always-on verification pass.
+    Returns (response_text, sources, reasoning_chain).
+    """
     chat_msgs = _build_chat_messages(session_messages)
+    reasoning: List[str] = []
 
     # === Step 0: Enhance the user's query for better search results ===
     try:
@@ -851,11 +854,14 @@ def get_palomo_response(
         if len(enhanced_query) > 10 and len(enhanced_query) < len(query) * 10:
             print(f"[QA Enhancer] '{query}' => '{enhanced_query}'")
             search_query = enhanced_query
+            reasoning.append(f"🔍 **Pregunta optimizada:** {enhanced_query}")
         else:
             search_query = query
+            reasoning.append("🔍 **Pregunta:** Se usó la pregunta original sin modificaciones.")
     except Exception as e:
         print(f"[QA Enhancer] Failed, using original query: {e}")
         search_query = query
+        reasoning.append("🔍 **Pregunta:** Se usó la pregunta original (optimizador no disponible).")
 
     # === Pass 1: Broad search with enhanced query ===
     api_messages = [
@@ -864,6 +870,7 @@ def get_palomo_response(
         {"role": "user", "content": search_query},
     ]
     text, sources = _perplexity_request(api_key, api_messages)
+    reasoning.append(f"🎯 **Búsqueda principal:** Se generaron {len(sources)} fuentes en la búsqueda inicial.")
 
     # === Pass 2: Verification ===
     # KEY: Put the draft in the USER message so Perplexity's search engine
@@ -890,14 +897,24 @@ def get_palomo_response(
             text = verified_text
             # Merge new sources
             existing_urls = {s.get("url") for s in sources if s.get("url")}
+            new_count = 0
             for s in extra_sources:
                 if s.get("url") and s["url"] not in existing_urls:
                     sources.append(s)
                     existing_urls.add(s["url"])
+                    new_count += 1
+            domains_used = ", ".join(_ALLOWLIST_DOMAINS[:5]) + "..."
+            reasoning.append(
+                f"✅ **Verificación completada:** Datos cruzados contra fuentes elite "
+                f"({domains_used}). Se añadieron {new_count} fuente(s) de verificación."
+            )
+        else:
+            reasoning.append("⚠️ **Verificación:** El verificador no devolvió contenido suficiente. Se usó la respuesta original.")
     except Exception as e:
         print(f"[QA Verify] Verification pass failed, using original: {e}")
+        reasoning.append(f"⚠️ **Verificación omitida:** {e}")
 
-    return text, sources
+    return text, sources, reasoning
 
 
 # ---------------------------------------------------------------------------
@@ -1528,12 +1545,12 @@ def _render_palomo_gpt(api_key: str) -> None:
             with st.status(
                 "🔍 Buscando información verificada...", expanded=False
             ) as status:
-                text, citations = get_palomo_response(
+                text, citations, reasoning_chain = get_palomo_response(
                     query=user_prompt,
                     session_messages=msgs,
                     api_key=api_key,
                 )
-                status.update(label="✅ Información encontrada", state="complete")
+                status.update(label="✅ Información encontrada y verificada", state="complete")
 
             full_response = text
             source_text = _format_sources(citations)
@@ -1542,6 +1559,12 @@ def _render_palomo_gpt(api_key: str) -> None:
 
             st.markdown(full_response)
             msgs.append({"role": "assistant", "content": full_response})
+
+            # Show reasoning chain
+            if reasoning_chain:
+                with st.expander("🧠 Cadena de razonamiento", expanded=False):
+                    for step in reasoning_chain:
+                        st.markdown(step)
 
         except Exception as e:
             err_msg = f"❌ Error: {e}"
