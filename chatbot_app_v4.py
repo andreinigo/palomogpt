@@ -171,6 +171,33 @@ Devuelve SOLAMENTE el texto verificado y corregido, con el mismo formato markdow
 NO agregues notas, disculpas ni explicaciones sobre tus correcciones.
 """
 
+_MATCH_VALIDATION_PROMPT = """Eres un validador de partidos de fútbol. El usuario quiere preparar \
+un informe para un partido. Tu MISIÓN es verificar que los equipos y el partido sean reales.
+
+Datos proporcionados:
+- Equipo Local: "{home_team}"
+- Equipo Visitante: "{away_team}"
+- Torneo: "{tournament}"
+
+FECHA ACTUAL: {current_date}.
+
+DEBES RESPONDER EXACTAMENTE con un JSON (sin texto adicional) con esta estructura:
+{{
+  "valid": true/false,
+  "home_team": "Nombre oficial completo del equipo local",
+  "away_team": "Nombre oficial completo del equipo visitante",
+  "reason": "Breve explicación si es inválido, vacío si es válido"
+}}
+
+REGLAS:
+1. Resuelve nombres ambiguos: "R.C. Celta" → "Celta de Vigo", "Barca" → "FC Barcelona", etc.
+2. Usa el nombre más común y reconocido internacionalmente (el que usaría un narrador de TV).
+3. Marca como VALID si ambos equipos existen y podrían razonablemente enfrentarse en ese torneo.
+4. Marca como INVALID solo si un equipo no existe o el enfrentamiento es imposible en ese torneo \
+   (ej. dos equipos de ligas incompatibles en una liga doméstica).
+5. SOLO devuelve el JSON, nada más.
+"""
+
 # --- Match Preparation prompts ---
 
 _TEAM_HISTORY_PROMPT = """Eres un investigador de fútbol meticuloso y exhaustivo. \
@@ -771,11 +798,7 @@ def get_palomo_response(
     ]
     text, sources = _perplexity_request(api_key, api_messages)
 
-    # === Pass 2: Domain-filtered verification ===
-    _STATS_DOMAINS = [
-        "fbref.com", "statmuse.com", "theanalyst.com",
-        "soccerassociation.com", "olympedia.org", "wikipedia.org",
-    ]
+    # === Pass 2: Verification (broad search, prompt-guided to elite sources) ===
     verify_prompt = _VERIFY_RESPONSE_PROMPT.format(
         query=query,
         response=text,
@@ -787,7 +810,6 @@ def get_palomo_response(
     try:
         verified_text, extra_sources = _perplexity_request(
             api_key, verify_msgs, timeout=90,
-            search_domain_filter=_STATS_DOMAINS,
         )
         # Guard: only accept if the verifier returned substantial text
         if len(verified_text) > len(text) * 0.3:
@@ -917,11 +939,7 @@ def _research_single_player(
     ]
     text, sources = _perplexity_request(api_key, messages, timeout=120)
 
-    # Secondary Fact Checking Layer (domain-filtered for authoritative verification)
-    _STATS_DOMAINS = [
-        "fbref.com", "statmuse.com", "theanalyst.com",
-        "soccerassociation.com", "olympedia.org", "wikipedia.org",
-    ]
+    # Secondary Fact Checking Layer (authoritative verification via web search)
     fact_check_msgs = [
         {"role": "system", "content": _FACT_CHECK_PROMPT_PLAYER},
         {
@@ -932,7 +950,6 @@ def _research_single_player(
     try:
         clean_text, _ = _perplexity_request(
             api_key, fact_check_msgs, timeout=60,
-            search_domain_filter=_STATS_DOMAINS,
         )
         # Guard: only accept if verifier returned substantial content
         if len(clean_text) > len(text) * 0.3:
@@ -1527,7 +1544,44 @@ def _render_match_prep(api_key: str) -> None:
             )
             return
 
-        # Store config
+        # --- Validate match via LLM ---
+        with st.status("🔍 Validando equipos y partido...", expanded=True) as val_status:
+            try:
+                val_prompt = _MATCH_VALIDATION_PROMPT.format(
+                    home_team=home_team,
+                    away_team=away_team,
+                    tournament=tournament,
+                    current_date=CURRENT_DATE,
+                )
+                val_msgs = [
+                    {"role": "system", "content": val_prompt},
+                    {"role": "user", "content": "Valida este partido y devuelve el JSON."},
+                ]
+                val_text, _ = _perplexity_request(api_key, val_msgs, timeout=30)
+
+                # Parse JSON from response
+                json_match = re.search(r'\{[\s\S]*\}', val_text)
+                if json_match:
+                    val_data = json.loads(json_match.group())
+                    if not val_data.get("valid", True):
+                        reason = val_data.get("reason", "Partido no reconocido.")
+                        val_status.update(label=f"❌ {reason}", state="error")
+                        st.error(f"⚠️ {reason}")
+                        return
+                    # Use resolved names
+                    home_team = val_data.get("home_team", home_team)
+                    away_team = val_data.get("away_team", away_team)
+                    val_status.update(
+                        label=f"✅ Partido validado: {home_team} vs {away_team}",
+                        state="complete", expanded=False,
+                    )
+                else:
+                    val_status.update(label="⚠️ No se pudo validar, continuando...", state="complete", expanded=False)
+            except Exception as e:
+                print(f"[MatchPrep] Validation failed, continuing: {e}")
+                val_status.update(label="⚠️ Validación omitida, continuando...", state="complete", expanded=False)
+
+        # Store config with resolved names
         st.session_state.match_config = {
             "home_team": home_team,
             "away_team": away_team,
