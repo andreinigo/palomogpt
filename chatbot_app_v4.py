@@ -183,24 +183,21 @@ En AMBOS casos:
 
 # --- Prompt Enhancer ---
 
-_PROMPT_ENHANCER_SYSTEM = """Eres un experto en fútbol y en formular preguntas de búsqueda precisas.
+_PROMPT_ENHANCER_SYSTEM = """Eres un experto en fútbol que REFORMULA preguntas para mejorar búsquedas web.
 
-Tu MISIÓN: Tomar la pregunta del usuario sobre fútbol y MEJORARLA para que una búsqueda \
-en internet devuelva los mejores resultados posibles.
+ENTRADA: Una pregunta del usuario sobre fútbol.
+SALIDA: UNA SOLA oración reformulada, más precisa y buscable. Nada más.
 
-REGLAS:
-1. Expande abreviaturas y jerga: "DTs gringos" → "directores técnicos nacidos en Estados Unidos"
-2. Añade contexto específico: Nombra las competiciones relevantes (DFB Pokal, Copa del Rey, FA Cup, etc.)
-3. Añade rango temporal si falta: "en los últimos años" → "entre 2015 y 2026"
-4. Resuelve ambigüedades con sentido común futbolístico:
-   - "copas domésticas" cuando habla de un país específico = las copas de ESE país
-   - "exceptuando copas domésticas" sin país = las copas del país de origen del sujeto
-   - Ejemplo: si pregunta sobre DTs de EEUU y dice "excepto copas domésticas", se refiere a \
-     excepto MLS Cup, US Open Cup, y otras copas estadounidenses. NO excluir Copa del Rey, DFB Pokal, etc.
-5. Pide específicamente los datos que se necesitarían para responder bien: resultados, fechas, equipos.
-6. NO respondas la pregunta. SOLO devuelve la versión mejorada de la pregunta.
-7. Mantén el idioma original del usuario.
-8. Máximo 3 oraciones.
+REGLAS ABSOLUTAS:
+- JAMÁS hagas preguntas de vuelta. JAMÁS pidas aclaraciones. JAMÁS ofrezcas alternativas.
+- NO preguntes "¿te refieres a...?" ni "¿prefieres...?". Solo REFORMULA.
+- Haz tu MEJOR interpretación con sentido común futbolístico y produce la pregunta mejorada.
+- Expande jerga: "DTs gringos" → "directores técnicos nacidos en Estados Unidos"
+- Nombra competiciones relevantes explícitamente.
+- "copas domésticas" para personas de país X = competiciones de ESE país de origen.
+  Ejemplo: Para DTs de EEUU, "domésticas" = MLS Cup, US Open Cup.
+  Copa del Rey, DFB Pokal, Copa de Austria = copas EXTRANJERAS, SÍ incluirlas.
+- Máximo 2 oraciones. Solo la pregunta reformulada, CERO texto adicional.
 """
 
 # --- Verification / Fact Checker Prompts ---
@@ -856,8 +853,13 @@ def get_palomo_response(
             api_key, enhance_msgs, timeout=30, model="sonar-reasoning-pro"
         )
         enhanced_query = enhanced_query.strip()
-        # Guard: only use if the enhancer returned something reasonable
-        if len(enhanced_query) > 10 and len(enhanced_query) < len(query) * 10:
+        # Guard: reject if the model asked a clarifying question instead of reformulating
+        _is_clarifying = any(p in enhanced_query.lower() for p in [
+            "¿prefieres", "¿te refieres", "¿o se trata", "¿quieres decir",
+            "prefieres preguntar", "no está claro",
+        ])
+        # Guard: only use if reasonable and not a clarifying question
+        if not _is_clarifying and len(enhanced_query) > 10 and len(enhanced_query) < len(query) * 10:
             print(f"[QA Enhancer] '{query}' => '{enhanced_query}'")
             search_query = enhanced_query
             reasoning.append(
