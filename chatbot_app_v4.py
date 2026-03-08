@@ -853,7 +853,7 @@ def get_palomo_response(
             {"role": "user", "content": query},
         ]
         enhanced_query, _ = _perplexity_request(
-            api_key, enhance_msgs, timeout=30, model="sonar-reasoning"
+            api_key, enhance_msgs, timeout=30, model="sonar-reasoning-pro"
         )
         enhanced_query = enhanced_query.strip()
         # Guard: only use if the enhancer returned something reasonable
@@ -861,7 +861,7 @@ def get_palomo_response(
             print(f"[QA Enhancer] '{query}' => '{enhanced_query}'")
             search_query = enhanced_query
             reasoning.append(
-                f"🔍 **Pregunta optimizada** (modelo: `sonar-reasoning`):\n\n"
+                f"🔍 **Pregunta optimizada** (modelo: `sonar-reasoning-pro`):\n\n"
                 f"> {enhanced_query}\n\n"
                 f"<details><summary>Prompt del optimizador</summary>\n\n"
                 f"```\n{_PROMPT_ENHANCER_SYSTEM.strip()}\n```\n</details>"
