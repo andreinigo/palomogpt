@@ -104,6 +104,16 @@ ni premios. Todo dato que mencionas debe ser verificable con las fuentes que enc
 Si algo es ambiguo o contradictorio entre fuentes, lo dices con honestidad — como cuando \
 en una transmisión no tienes la repetición clara y lo reconoces.
 
+ZONAS DE ALTO RIESGO DE ALUCINACIÓN (cuidado extremo):
+- Afirmaciones "el primero en...", "nunca antes...", "único en la historia": Solo si la fuente \
+  lo confirma explícitamente. Si no estás 100%% seguro, NO lo digas.
+- Finales, títulos, trofeos: DIFERENCIA CLARAMENTE entre "dirigió en una liga" y \
+  "llegó a una final". Jamás impliques que alguien llegó a una final si no tienes la fuente.
+- Estadísticas exactas (goles, asistencias, fechas de debut): Solo cita números de las fuentes.
+- Datos personales de jugadores (esposas, hijos, hobbies): Solo si aparece en prensa verificable.
+- Si NO encuentras evidencia de algo específico, di claramente: "No he encontrado evidencia \
+  de que [X] haya [Y]" en lugar de inventar o implicar logros.
+
 Tu cancha cubre TODO el fútbol: estadísticas de cualquier liga y época, vida personal de \
 jugadores (solo lo público y verificado), historia de clubes, táctica, transferencias, \
 comparaciones, entrevistas citadas, la temporada actual \
@@ -151,26 +161,43 @@ En AMBOS casos:
 - Formato limpio en markdown, texto natural. Sin relleno ni JSON.
 """.strip()
 
+# --- Prompt Enhancer ---
+
+_PROMPT_ENHANCER_SYSTEM = """Eres un experto en fútbol y en formular preguntas de búsqueda precisas.
+
+Tu MISIÓN: Tomar la pregunta del usuario sobre fútbol y MEJORARLA para que una búsqueda \
+en internet devuelva los mejores resultados posibles.
+
+REGLAS:
+1. Expande abreviaturas y jerga: "DTs gringos" → "directores técnicos nacidos en Estados Unidos"
+2. Añade contexto específico: Nombra las competiciones relevantes (DFB Pokal, Copa del Rey, FA Cup, etc.)
+3. Añade rango temporal si falta: "en los últimos años" → "entre 2015 y 2026"
+4. Resuelve ambigüedades: "copas en Europa" → "copas nacionales domésticas en las ligas top-5 europeas"
+5. Pide específicamente los datos que se necesitarían para responder bien: resultados, fechas, equipos.
+6. NO respondas la pregunta. SOLO devuelve la versión mejorada de la pregunta.
+7. Mantén el idioma original del usuario.
+8. Máximo 3 oraciones.
+"""
+
 # --- Verification / Fact Checker Prompts ---
 
-_VERIFY_RESPONSE_PROMPT = """Eres un periodista deportivo de élite especializado en fútbol. \
-Se te entrega un BORRADOR de respuesta sobre fútbol generado por IA.
+_VERIFY_RESPONSE_PROMPT = """Eres un periodista deportivo de élite que trabaja para ESPN. \
+Tu especialidad es el fact-checking de datos de fútbol.
 
-Tu MISIÓN como periodista deportivo:
-1. BUSCA en fuentes deportivas (FBref, Wikipedia, Transfermarkt, UEFA, FIFA) si las \
-   estadísticas, fechas, récords y datos del borrador son correctos.
-2. Si encuentras un dato incorrecto (goles, fechas de debut, traspasos), REEMPLÁZALO \
-   con el dato real que encuentres en las fuentes.
-3. Si hay afirmaciones que parecen inventadas y no encuentras evidencia, ELIMÍNALAS.
-4. MANTÉN el estilo narrativo y estructura del borrador original.
+INSTRUCCIONES:
+1. BUSCA en la web si cada dato factual del borrador es correcto.
+2. Si un dato es incorrecto, REEMPÁZALO con el dato real.
+3. Si una afirmación parece inventada y no encuentras evidencia, ELIMÍNALA.
+4. MANTÉN el estilo narrativo y formato markdown del original.
+5. Devuelve SOLO el texto deportivo final verificado, sin comentarios.
 
-PREGUNTA ORIGINAL SOBRE FÚTBOL: "{query}"
-
-BORRADOR SOBRE FÚTBOL A VERIFICAR:
-{response}
-
-Devuelve SOLAMENTE el texto deportivo verificado, con el mismo formato markdown.
-NO menciones el proceso de verificación. Solo entrega el texto final.
+CHECKLIST DE VERIFICACIÓN OBLIGATORIA (las áreas donde más se inventan datos):
+☑ Afirmaciones "primero en la historia", "único", "nunca antes" → ¿La fuente lo dice explícitamente?
+☑ Finales y títulos → ¿Realmente llegó a esa final? ¿Realmente ganó ese título? NO confundir \
+  "dirigió en una liga" con "llegó a una final".
+☑ Estadísticas exactas (goles, asistencias, partidos) → ¿Coinciden con las fuentes?
+☑ Fechas y años → ¿Es el año correcto?
+☑ Datos personales (esposa, hijos, profesión familiar) → Si no hay fuente clara, ELIMINAR.
 """
 
 _MATCH_VALIDATION_PROMPT = """Eres un validador de partidos de fútbol. El usuario quiere preparar \
@@ -792,22 +819,46 @@ def get_palomo_response(
     """Get a response from PalomoGPT with always-on verification pass."""
     chat_msgs = _build_chat_messages(session_messages)
 
-    # === Pass 1: Broad search (NO domain filter) ===
+    # === Step 0: Enhance the user's query for better search results ===
+    try:
+        enhance_msgs = [
+            {"role": "system", "content": _PROMPT_ENHANCER_SYSTEM},
+            {"role": "user", "content": query},
+        ]
+        enhanced_query, _ = _perplexity_request(api_key, enhance_msgs, timeout=20)
+        enhanced_query = enhanced_query.strip()
+        # Guard: only use if the enhancer returned something reasonable
+        if len(enhanced_query) > 10 and len(enhanced_query) < len(query) * 10:
+            print(f"[QA Enhancer] '{query}' => '{enhanced_query}'")
+            search_query = enhanced_query
+        else:
+            search_query = query
+    except Exception as e:
+        print(f"[QA Enhancer] Failed, using original query: {e}")
+        search_query = query
+
+    # === Pass 1: Broad search with enhanced query ===
     api_messages = [
         {"role": "system", "content": _PALOMO_GPT_SYSTEM},
         *chat_msgs,
-        {"role": "user", "content": query},
+        {"role": "user", "content": search_query},
     ]
     text, sources = _perplexity_request(api_key, api_messages)
 
-    # === Pass 2: Verification (broad search, prompt-guided to elite sources) ===
-    verify_prompt = _VERIFY_RESPONSE_PROMPT.format(
-        query=query,
-        response=text,
-    )
+    # === Pass 2: Verification ===
+    # KEY: Put the draft in the USER message so Perplexity's search engine
+    # can see the football names/claims and search for them specifically.
     verify_msgs = [
-        {"role": "system", "content": verify_prompt},
-        {"role": "user", "content": "Como periodista deportivo, verifica las estadísticas y datos de fútbol del borrador anterior. Devuelve solo el texto deportivo final."}
+        {"role": "system", "content": _VERIFY_RESPONSE_PROMPT},
+        {
+            "role": "user",
+            "content": (
+                f"La pregunta original del usuario fue: \"{query}\"\n\n"
+                f"Este es el borrador de respuesta sobre fútbol que debes verificar. "
+                f"Busca si los datos, estadísticas, títulos y fechas son correctos:\n\n"
+                f"{text}"
+            ),
+        },
     ]
     try:
         verified_text, extra_sources = _perplexity_request(
