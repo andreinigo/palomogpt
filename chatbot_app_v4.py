@@ -93,8 +93,15 @@ def _supabase_client() -> Optional[SupabaseClient]:
     url = st.secrets.get("SUPABASE_URL", "")
     key = st.secrets.get("SUPABASE_KEY", "")
     if not url or not key:
+        print("[Supabase] Missing SUPABASE_URL or SUPABASE_KEY in secrets.")
         return None
-    return create_client(url, key)
+    try:
+        client = create_client(url, key)
+        print(f"[Supabase] Client created for {url}")
+        return client
+    except Exception as e:
+        print(f"[Supabase] Failed to create client: {e}")
+        return None
 
 
 def _create_conversation(mode: str = MODE_PALOMO_GPT, title: str = "Nueva conversación") -> str:
@@ -102,8 +109,14 @@ def _create_conversation(mode: str = MODE_PALOMO_GPT, title: str = "Nueva conver
     sb = _supabase_client()
     if not sb:
         return ""
-    row = sb.table("conversations").insert({"title": title, "mode": mode}).execute()
-    return row.data[0]["id"] if row.data else ""
+    try:
+        row = sb.table("conversations").insert({"title": title, "mode": mode}).execute()
+        conv_id = row.data[0]["id"] if row.data else ""
+        print(f"[Supabase] Created conversation: {conv_id} — '{title}'")
+        return conv_id
+    except Exception as e:
+        print(f"[Supabase] Error creating conversation: {e}")
+        return ""
 
 
 def _list_conversations(limit: int = 30) -> List[Dict[str, Any]]:
@@ -111,8 +124,18 @@ def _list_conversations(limit: int = 30) -> List[Dict[str, Any]]:
     sb = _supabase_client()
     if not sb:
         return []
-    resp = sb.table("conversations").select("id, title, mode, updated_at").order("updated_at", desc=True).limit(limit).execute()
-    return resp.data or []
+    try:
+        resp = (
+            sb.table("conversations")
+            .select("id, title, mode, updated_at")
+            .order("updated_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return resp.data or []
+    except Exception as e:
+        print(f"[Supabase] Error listing conversations: {e}")
+        return []
 
 
 def _load_messages(conv_id: str) -> List[Dict[str, str]]:
@@ -120,17 +143,37 @@ def _load_messages(conv_id: str) -> List[Dict[str, str]]:
     sb = _supabase_client()
     if not sb or not conv_id:
         return []
-    resp = sb.table("messages").select("role, content").eq("conversation_id", conv_id).order("created_at").execute()
-    return [{"role": m["role"], "content": m["content"]} for m in (resp.data or [])]
+    try:
+        resp = (
+            sb.table("messages")
+            .select("role, content")
+            .eq("conversation_id", conv_id)
+            .order("created_at")
+            .execute()
+        )
+        return [{"role": m["role"], "content": m["content"]} for m in (resp.data or [])]
+    except Exception as e:
+        print(f"[Supabase] Error loading messages for {conv_id}: {e}")
+        return []
 
 
 def _save_message(conv_id: str, role: str, content: str) -> None:
-    """Save a single message and update conversation timestamp."""
+    """Save a single message and touch the conversation's updated_at."""
     sb = _supabase_client()
     if not sb or not conv_id:
         return
-    sb.table("messages").insert({"conversation_id": conv_id, "role": role, "content": content}).execute()
-    sb.table("conversations").update({"updated_at": "now()"}).eq("id", conv_id).execute()
+    try:
+        sb.table("messages").insert({
+            "conversation_id": conv_id,
+            "role": role,
+            "content": content,
+        }).execute()
+        # Update conversation timestamp with proper ISO datetime
+        sb.table("conversations").update({
+            "updated_at": datetime.utcnow().isoformat(),
+        }).eq("id", conv_id).execute()
+    except Exception as e:
+        print(f"[Supabase] Error saving message: {e}")
 
 
 def _update_conversation_title(conv_id: str, title: str) -> None:
@@ -138,7 +181,10 @@ def _update_conversation_title(conv_id: str, title: str) -> None:
     sb = _supabase_client()
     if not sb or not conv_id:
         return
-    sb.table("conversations").update({"title": title}).eq("id", conv_id).execute()
+    try:
+        sb.table("conversations").update({"title": title}).eq("id", conv_id).execute()
+    except Exception as e:
+        print(f"[Supabase] Error updating title: {e}")
 
 
 def _delete_conversation(conv_id: str) -> None:
@@ -146,7 +192,11 @@ def _delete_conversation(conv_id: str) -> None:
     sb = _supabase_client()
     if not sb or not conv_id:
         return
-    sb.table("conversations").delete().eq("id", conv_id).execute()
+    try:
+        sb.table("conversations").delete().eq("id", conv_id).execute()
+        print(f"[Supabase] Deleted conversation: {conv_id}")
+    except Exception as e:
+        print(f"[Supabase] Error deleting conversation: {e}")
 
 
 def _auto_title(text: str) -> str:
@@ -1393,6 +1443,25 @@ def main() -> None:
 
     api_key = st.secrets.get("GEMINI_API_KEY", "")
 
+    # ---- Session state init ----
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+    if "current_conv_id" not in st.session_state:
+        st.session_state.current_conv_id = ""
+
+    # ---- Eagerly capture chat_input ----
+    # chat_input is collected here BEFORE sidebar renders.
+    # This lets us create the conversation in Supabase before
+    # _list_conversations() runs in the sidebar.
+    incoming_query = st.chat_input("Pregunta sobre cualquier tema de fútbol...")
+    if incoming_query and not st.session_state.current_conv_id:
+        # First message in a new session → create conversation now
+        conv_id = _create_conversation(
+            mode=MODE_PALOMO_GPT,
+            title=_auto_title(incoming_query),
+        )
+        st.session_state.current_conv_id = conv_id
+
     # ---- Sidebar ----
     with st.sidebar:
         st.markdown(
@@ -1416,9 +1485,6 @@ def main() -> None:
 
         # ---- Conversation management (PalomoGPT mode) ----
         if app_mode == MODE_PALOMO_GPT:
-            # Initialize current_conv_id if needed
-            if "current_conv_id" not in st.session_state:
-                st.session_state.current_conv_id = ""
 
             # Show "New conversation" only when inside an existing conversation
             has_active_conv = bool(st.session_state.get("current_conv_id", ""))
@@ -1468,7 +1534,7 @@ def main() -> None:
 
     # ---- Route to active mode ----
     if app_mode == MODE_PALOMO_GPT:
-        _render_palomo_gpt(api_key)
+        _render_palomo_gpt(api_key, incoming_query)
     else:
         _render_match_prep(api_key)
 
@@ -1476,7 +1542,7 @@ def main() -> None:
 # ---------------------------------------------------------------------------
 # PalomoGPT mode
 # ---------------------------------------------------------------------------
-def _render_palomo_gpt(api_key: str) -> None:
+def _render_palomo_gpt(api_key: str, incoming_query: Optional[str] = None) -> None:
     col_h1, _ = st.columns([3, 1])
     with col_h1:
         st.markdown(
@@ -1490,12 +1556,10 @@ def _render_palomo_gpt(api_key: str) -> None:
             unsafe_allow_html=True,
         )
 
-    # Chat history
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
+    msgs = st.session_state.messages
 
-    # Welcome screen
-    if not st.session_state.messages:
+    # Welcome screen (only when no conversation loaded)
+    if not msgs and not incoming_query:
         st.markdown(
             '<div class="welcome-card">'
             '<h3>🏟️ ¡Bienvenidos, señores! Aquí Fernando Palomo</h3>'
@@ -1516,17 +1580,24 @@ def _render_palomo_gpt(api_key: str) -> None:
                     st.session_state.messages.append(
                         {"role": "user", "content": example}
                     )
+                    # Create conversation for example query
+                    if not st.session_state.current_conv_id:
+                        cid = _create_conversation(
+                            mode=MODE_PALOMO_GPT,
+                            title=_auto_title(example),
+                        )
+                        st.session_state.current_conv_id = cid
                     st.rerun()
+        return
     else:
-        for msg in st.session_state.messages:
+        for msg in msgs:
             with st.chat_message(msg["role"]):
                 st.markdown(msg.get("content", ""))
 
-    # Chat input
-    user_prompt = st.chat_input("Pregunta sobre cualquier tema de fútbol...")
+    # Use the query captured in main() (chat_input is already rendered there)
+    user_prompt = incoming_query
 
     pending_prompt = None
-    msgs = st.session_state.messages
     if msgs and msgs[-1]["role"] == "user":
         pending_prompt = msgs[-1]["content"]
 
@@ -1538,19 +1609,8 @@ def _render_palomo_gpt(api_key: str) -> None:
         with st.chat_message("user"):
             st.markdown(user_prompt)
 
-        # Auto-create conversation on first user message
+        # Save user message to DB (conversation already created in main())
         conv_id = st.session_state.get("current_conv_id", "")
-        if not conv_id:
-            conv_id = _create_conversation(
-                mode=MODE_PALOMO_GPT,
-                title=_auto_title(user_prompt),
-            )
-            st.session_state.current_conv_id = conv_id
-        elif len(msgs) == 1:
-            # First message in this conv — set title
-            _update_conversation_title(conv_id, _auto_title(user_prompt))
-
-        # Save user message to DB
         _save_message(conv_id, "user", user_prompt)
 
     elif pending_prompt:
