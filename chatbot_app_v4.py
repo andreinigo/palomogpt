@@ -1416,16 +1416,17 @@ def main() -> None:
 
         # ---- Conversation management (PalomoGPT mode) ----
         if app_mode == MODE_PALOMO_GPT:
-            # New conversation button
-            if st.button("➕ Nueva conversación", use_container_width=True):
-                conv_id = _create_conversation(mode=MODE_PALOMO_GPT)
-                st.session_state.current_conv_id = conv_id
-                st.session_state.messages = []
-                st.rerun()
-
             # Initialize current_conv_id if needed
             if "current_conv_id" not in st.session_state:
                 st.session_state.current_conv_id = ""
+
+            # Show "New conversation" only when inside an existing conversation
+            has_active_conv = bool(st.session_state.get("current_conv_id", ""))
+            if has_active_conv:
+                if st.button("➕ Nueva conversación", use_container_width=True):
+                    st.session_state.current_conv_id = ""
+                    st.session_state.messages = []
+                    st.rerun()
 
             # List past conversations
             convs = _list_conversations()
