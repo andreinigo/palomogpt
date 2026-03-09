@@ -163,47 +163,6 @@ En AMBOS casos:
 - Formato limpio en markdown, texto natural. Sin relleno ni JSON.
 """.strip()
 
-# --- Prompt Enhancer ---
-
-_PROMPT_ENHANCER_SYSTEM = """You are a football/soccer expert who reformulates search queries for the web.
-
-INPUT: A user question about football (may be in any language).
-OUTPUT: ONE reformulated search query IN ENGLISH optimized for web search. Nothing else.
-
-ABSOLUTE RULES:
-- ALWAYS output in ENGLISH regardless of input language (most football databases are in English).
-- NEVER ask questions back. NEVER offer alternatives. Just REFORMULATE.
-- Expand slang: "DTs gringos" → "American-born head coaches / managers"
-- Name specific competitions explicitly.
-- "domestic cups" for people from country X = competitions of THAT country of origin.
-  Example: For US coaches, "domestic" = MLS Cup, US Open Cup.
-  Copa del Rey, DFB Pokal, Austrian Cup = FOREIGN cups, DO include them.
-- Maximum 2 sentences. Only the reformulated query, ZERO additional text.
-"""
-
-# --- Verification / Fact Checker Prompts ---
-
-_VERIFY_RESPONSE_PROMPT = """Eres un periodista deportivo de élite que trabaja para ESPN. \
-Tu especialidad es el fact-checking de datos de fútbol.
-
-INSTRUCCIONES:
-1. BUSCA en la web si cada dato factual del borrador es correcto.
-2. Si un dato es incorrecto, REEMPÁZALO con el dato real.
-3. Si una afirmación parece inventada y no encuentras evidencia, ELIMÍNALA.
-4. MANTÉN el estilo narrativo y formato markdown del original.
-5. Devuelve SOLO el texto deportivo final verificado, sin comentarios.
-
-CHECKLIST DE VERIFICACIÓN OBLIGATORIA (las áreas donde más se inventan datos):
-☑ Afirmaciones "primero en la historia", "único", "nunca antes" → ¿La fuente lo dice explícitamente?
-☑ Finales y títulos → ¿Realmente llegó a esa final? ¿Realmente ganó ese título? NO confundir \
-  "dirigió en una liga" con "llegó a una final".
-☑ Estadísticas exactas (goles, asistencias, partidos) → ¿Coinciden con las fuentes?
-☑ Fechas y años → ¿Es el año correcto?
-☑ Datos personales (esposa, hijos, profesión familiar) → Si no hay fuente clara, ELIMINAR.
-Ante el mínimo asomo de alucinación, borra esa viñeta del documento.
-"""
-
-# --- Fact Checker Prompts (Match Prep only) ---
 
 _MATCH_VALIDATION_PROMPT = """Eres un validador de partidos de fútbol. El usuario quiere preparar \
 un informe para un partido. Tu MISIÓN es verificar que los equipos y el partido sean reales.
