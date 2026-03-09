@@ -20,6 +20,7 @@ import streamlit as st
 from google import genai
 from google.genai import types
 from fpdf import FPDF
+from supabase import create_client, Client as SupabaseClient
 from io import BytesIO
 
 # ---------------------------------------------------------------------------
@@ -81,6 +82,78 @@ MATCH_TYPE_OPTIONS = [
     "Partido Único (eliminatoria)",
     "Amistoso",
 ]
+
+# ---------------------------------------------------------------------------
+# Supabase persistence helpers
+# ---------------------------------------------------------------------------
+
+@st.cache_resource
+def _supabase_client() -> Optional[SupabaseClient]:
+    """Return a cached Supabase client, or None if not configured."""
+    url = st.secrets.get("SUPABASE_URL", "")
+    key = st.secrets.get("SUPABASE_KEY", "")
+    if not url or not key:
+        return None
+    return create_client(url, key)
+
+
+def _create_conversation(mode: str = MODE_PALOMO_GPT, title: str = "Nueva conversación") -> str:
+    """Create a new conversation and return its UUID."""
+    sb = _supabase_client()
+    if not sb:
+        return ""
+    row = sb.table("conversations").insert({"title": title, "mode": mode}).execute()
+    return row.data[0]["id"] if row.data else ""
+
+
+def _list_conversations(limit: int = 30) -> List[Dict[str, Any]]:
+    """List recent conversations, newest first."""
+    sb = _supabase_client()
+    if not sb:
+        return []
+    resp = sb.table("conversations").select("id, title, mode, updated_at").order("updated_at", desc=True).limit(limit).execute()
+    return resp.data or []
+
+
+def _load_messages(conv_id: str) -> List[Dict[str, str]]:
+    """Load all messages for a conversation."""
+    sb = _supabase_client()
+    if not sb or not conv_id:
+        return []
+    resp = sb.table("messages").select("role, content").eq("conversation_id", conv_id).order("created_at").execute()
+    return [{"role": m["role"], "content": m["content"]} for m in (resp.data or [])]
+
+
+def _save_message(conv_id: str, role: str, content: str) -> None:
+    """Save a single message and update conversation timestamp."""
+    sb = _supabase_client()
+    if not sb or not conv_id:
+        return
+    sb.table("messages").insert({"conversation_id": conv_id, "role": role, "content": content}).execute()
+    sb.table("conversations").update({"updated_at": "now()"}).eq("id", conv_id).execute()
+
+
+def _update_conversation_title(conv_id: str, title: str) -> None:
+    """Update conversation title."""
+    sb = _supabase_client()
+    if not sb or not conv_id:
+        return
+    sb.table("conversations").update({"title": title}).eq("id", conv_id).execute()
+
+
+def _delete_conversation(conv_id: str) -> None:
+    """Delete a conversation and all its messages (cascade)."""
+    sb = _supabase_client()
+    if not sb or not conv_id:
+        return
+    sb.table("conversations").delete().eq("id", conv_id).execute()
+
+
+def _auto_title(text: str) -> str:
+    """Generate a short title from the first user message."""
+    clean = text.strip().replace("\n", " ")
+    return clean[:60] + "…" if len(clean) > 60 else clean
+
 
 # ---------------------------------------------------------------------------
 # System Prompts
@@ -1341,32 +1414,51 @@ def main() -> None:
 
         st.markdown("---")
 
+        # ---- Conversation management (PalomoGPT mode) ----
         if app_mode == MODE_PALOMO_GPT:
-            st.caption(
-                "**🎙️ PalomoGPT** detecta automáticamente si tu pregunta "
-                "necesita una respuesta rápida o un análisis profundo. "
-                "Solo pregunta sobre cualquier tema de fútbol."
-            )
-        else:
-            st.caption(
-                "**⚽ Preparación de Partidos** genera un informe completo "
-                "para transmisión: historial de temporadas, plantillas con "
-                "biografías y datos curiosos, y frases estilo Fernando Palomo."
-            )
-
-        st.markdown("---")
-        st.caption("🌐 Datos en tiempo real · Cualquier liga · Verificado con fuentes")
-        st.markdown("---")
-
-        if app_mode == MODE_PALOMO_GPT:
-            if st.button("🗑️ Limpiar conversación", use_container_width=True):
+            # New conversation button
+            if st.button("➕ Nueva conversación", use_container_width=True):
+                conv_id = _create_conversation(mode=MODE_PALOMO_GPT)
+                st.session_state.current_conv_id = conv_id
                 st.session_state.messages = []
                 st.rerun()
+
+            # Initialize current_conv_id if needed
+            if "current_conv_id" not in st.session_state:
+                st.session_state.current_conv_id = ""
+
+            # List past conversations
+            convs = _list_conversations()
+            if convs:
+                st.markdown("##### 💬 Conversaciones")
+                for conv in convs:
+                    cid = conv["id"]
+                    title = conv.get("title", "Sin título")
+                    is_active = cid == st.session_state.get("current_conv_id", "")
+
+                    col_title, col_del = st.columns([5, 1])
+                    with col_title:
+                        label = f"**▶ {title}**" if is_active else title
+                        if st.button(label, key=f"conv_{cid}", use_container_width=True):
+                            st.session_state.current_conv_id = cid
+                            st.session_state.messages = _load_messages(cid)
+                            st.rerun()
+                    with col_del:
+                        if st.button("🗑️", key=f"del_{cid}"):
+                            _delete_conversation(cid)
+                            if st.session_state.get("current_conv_id") == cid:
+                                st.session_state.current_conv_id = ""
+                                st.session_state.messages = []
+                            st.rerun()
         else:
+            # Match prep mode — keep simple clean/clear
             if st.button("🗑️ Limpiar informe", use_container_width=True):
                 st.session_state.pop("match_results", None)
                 st.session_state.pop("match_config", None)
                 st.rerun()
+
+        st.markdown("---")
+        st.caption("🌐 Datos en tiempo real · Cualquier liga · Verificado con fuentes")
 
         st.markdown(
             '<div class="app-footer">PalomoFacts v4 · AI: Google Gemini + Search Grounding</div>',
@@ -1444,6 +1536,22 @@ def _render_palomo_gpt(api_key: str) -> None:
             msgs.append({"role": "user", "content": user_prompt})
         with st.chat_message("user"):
             st.markdown(user_prompt)
+
+        # Auto-create conversation on first user message
+        conv_id = st.session_state.get("current_conv_id", "")
+        if not conv_id:
+            conv_id = _create_conversation(
+                mode=MODE_PALOMO_GPT,
+                title=_auto_title(user_prompt),
+            )
+            st.session_state.current_conv_id = conv_id
+        elif len(msgs) == 1:
+            # First message in this conv — set title
+            _update_conversation_title(conv_id, _auto_title(user_prompt))
+
+        # Save user message to DB
+        _save_message(conv_id, "user", user_prompt)
+
     elif pending_prompt:
         user_prompt = pending_prompt
     else:
@@ -1459,6 +1567,8 @@ def _render_palomo_gpt(api_key: str) -> None:
             st.warning(err)
             msgs.append({"role": "assistant", "content": err})
         return
+
+    conv_id = st.session_state.get("current_conv_id", "")
 
     # Get response
     with st.chat_message("assistant"):
@@ -1480,6 +1590,7 @@ def _render_palomo_gpt(api_key: str) -> None:
 
             st.markdown(full_response)
             msgs.append({"role": "assistant", "content": full_response})
+            _save_message(conv_id, "assistant", full_response)
 
             # Show reasoning chain as follow-up messages
             if reasoning_chain:
@@ -1487,6 +1598,7 @@ def _render_palomo_gpt(api_key: str) -> None:
                 with st.chat_message("assistant"):
                     st.markdown(chain_text)
                 msgs.append({"role": "assistant", "content": chain_text})
+                _save_message(conv_id, "assistant", chain_text)
 
         except Exception as e:
             err_msg = f"❌ Error: {e}"
@@ -1500,12 +1612,15 @@ def _render_palomo_gpt(api_key: str) -> None:
         # User bubble for the auto-generated question
         with st.chat_message("user"):
             st.markdown(f"🔍 {fu['question']}")
-        msgs.append({"role": "user", "content": f"🔍 {fu['question']}"})
+        q_text = f"🔍 {fu['question']}"
+        msgs.append({"role": "user", "content": q_text})
+        _save_message(conv_id, "user", q_text)
 
         # Assistant bubble for the answer
         with st.chat_message("assistant"):
             st.markdown(fu["answer"])
         msgs.append({"role": "assistant", "content": fu["answer"]})
+        _save_message(conv_id, "assistant", fu["answer"])
 
 
 # ---------------------------------------------------------------------------
