@@ -1614,18 +1614,22 @@ def main() -> None:
     if "current_conv_id" not in st.session_state:
         st.session_state.current_conv_id = ""
 
-    # ---- Eagerly capture chat_input ----
+    # ---- Eagerly capture chat_input (PalomoGPT only) ----
     # chat_input is collected here BEFORE sidebar renders.
     # This lets us create the conversation in Supabase before
     # _list_conversations() runs in the sidebar.
-    incoming_query = st.chat_input("Pregunta sobre cualquier tema de fútbol...")
-    if incoming_query and not st.session_state.current_conv_id:
-        # First message in a new session → create conversation now
-        conv_id = _create_conversation(
-            mode=MODE_PALOMO_GPT,
-            title=_auto_title(incoming_query),
-        )
-        st.session_state.current_conv_id = conv_id
+    # Only show in PalomoGPT mode (read prior mode from session state).
+    prior_mode = st.session_state.get("sb_app_mode", MODE_PALOMO_GPT)
+    incoming_query = None
+    if prior_mode == MODE_PALOMO_GPT:
+        incoming_query = st.chat_input("Pregunta sobre cualquier tema de fútbol...")
+        if incoming_query and not st.session_state.current_conv_id:
+            # First message in a new session → create conversation now
+            conv_id = _create_conversation(
+                mode=MODE_PALOMO_GPT,
+                title=_auto_title(incoming_query),
+            )
+            st.session_state.current_conv_id = conv_id
 
     # ---- Sidebar ----
     with st.sidebar:
