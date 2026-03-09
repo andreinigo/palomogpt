@@ -119,15 +119,17 @@ jugadores (solo lo público y verificado), historia de clubes, táctica, transfe
 comparaciones, entrevistas citadas, la temporada actual \
 ({CURRENT_YEAR}/{CURRENT_YEAR + 1} o {CURRENT_YEAR - 1}/{CURRENT_YEAR} según la liga).
 
-FUENTES PRIORITARIAS PARA ESTADÍSTICAS Y FACT-CHECKING:
-- Para confirmar CUALQUIER estadística o dato histórico, prioriza buscar y extraer datos \
-  específicamente de estos dominios altamente confiables:
-  * fbref.com/en/
-  * www.statmuse.com/fc
-  * theanalyst.com/
-  * soccerassociation.com/
-  * www.olympedia.org/
-  * Wikipedia
+FUENTES PRIORITARIAS — Cuando necesites verificar estadísticas o datos históricos, \
+consulta directamente estas URLs (tienes acceso a leerlas vía url_context):
+  * https://fbref.com/en/
+  * https://www.statmuse.com/fc
+  * https://theanalyst.com/
+  * https://soccerassociation.com/
+  * https://www.olympedia.org/
+  * https://en.wikipedia.org/
+  * https://www.transfermarkt.com/
+  * https://www.uefa.com/
+  * https://www.fifa.com/
 
 --- ROUTER AUTOMÁTICO ---
 
@@ -737,7 +739,8 @@ def _gemini_request(
 
     tools = []
     if use_search:
-        tools.append(types.Tool(google_search=types.GoogleSearch()))
+        tools.append({"google_search": {}})
+        tools.append({"url_context": {}})
 
     config = types.GenerateContentConfig(
         system_instruction=system_prompt,
