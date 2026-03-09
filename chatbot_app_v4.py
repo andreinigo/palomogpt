@@ -163,6 +163,23 @@ En AMBOS casos:
 - Formato limpio en markdown, texto natural. Sin relleno ni JSON.
 """.strip()
 
+# --- Follow-Up Question Generator ---
+_FOLLOW_UP_SYSTEM = f"""Eres el asistente de investigación de Fernando Palomo, el narrador de ESPN.
+Tu trabajo: leer su pregunta original y la respuesta que recibió, y generar UNA sola pregunta \
+de seguimiento que él haría.
+
+FECHA ACTUAL: {CURRENT_DATE}.
+
+REGLAS:
+- Piensa como un narrador preparando una transmisión: necesita DATOS DUROS, no opiniones.
+- Prioriza: zonas grises en la respuesta, afirmaciones sin fuente clara, estadísticas que \
+  faltan contexto, comparaciones que no se hicieron.
+- Si la respuesta dice "el primero en..." o "nunca antes...", pregunta por contraejemplos.
+- Si hay cifras, pregunta por el desglose o la comparación con rivales/contemporáneos.
+- NO uses frases de Palomo ni estilo narrativo. Sé directo y eficiente.
+- Devuelve SOLO la pregunta, sin explicaciones ni preámbulos. Una línea.
+"""
+
 
 _MATCH_VALIDATION_PROMPT = """Eres un validador de partidos de fútbol. El usuario quiere preparar \
 un informe para un partido. Tu MISIÓN es verificar que los equipos y el partido sean reales.
@@ -753,9 +770,9 @@ def get_palomo_response(
     query: str,
     session_messages: list[dict],
     api_key: str,
-) -> Tuple[str, List[Dict[str, str]], List[str]]:
-    """Get a response from PalomoGPT with Google Search grounding.
-    Returns (response_text, sources, reasoning_chain).
+) -> Tuple[str, List[Dict[str, str]], List[str], List[Dict[str, str]]]:
+    """Get a response from PalomoGPT with Google Search grounding + follow-up chain.
+    Returns (response_text, sources, reasoning_chain, followups).
     """
     # Build conversation history for Gemini
     history: List[types.Content] = []
@@ -787,7 +804,56 @@ def get_palomo_response(
         f"- Top fuentes: {', '.join(source_titles) if source_titles else 'ninguna'}\n"
     )
 
-    return text, sources, reasoning
+    # === Follow-up iterations: 2 rounds of auto-generated questions ===
+    followups: List[Dict[str, str]] = []
+    current_answer = text
+    for i in range(2):
+        try:
+            # Generate a follow-up question
+            followup_q, _ = _gemini_request(
+                api_key=api_key,
+                system_prompt=_FOLLOW_UP_SYSTEM,
+                user_message=(
+                    f"PREGUNTA ORIGINAL: {query}\n\n"
+                    f"RESPUESTA RECIBIDA:\n{current_answer}"
+                ),
+                use_search=False,
+            )
+            followup_q = followup_q.strip()
+            if not followup_q or len(followup_q) < 10:
+                break
+
+            reasoning.append(
+                f"🔄 **Follow-up {i+1}:** {followup_q}"
+            )
+
+            # Answer the follow-up question with search
+            followup_a, extra_sources = _gemini_request(
+                api_key=api_key,
+                system_prompt=_PALOMO_GPT_SYSTEM,
+                user_message=followup_q,
+                history=[
+                    types.Content(role="user", parts=[types.Part.from_text(text=query)]),
+                    types.Content(role="model", parts=[types.Part.from_text(text=current_answer)]),
+                ],
+            )
+
+            followups.append({"question": followup_q, "answer": followup_a})
+            current_answer = followup_a  # next iteration uses this answer
+
+            # Merge sources
+            existing_urls = {s.get("url") for s in sources if s.get("url")}
+            for s in extra_sources:
+                if s.get("url") and s["url"] not in existing_urls:
+                    sources.append(s)
+                    existing_urls.add(s["url"])
+
+        except Exception as e:
+            print(f"[Follow-up {i+1}] Error: {e}")
+            reasoning.append(f"⚠️ **Follow-up {i+1} omitido:** `{e}`")
+            break
+
+    return text, sources, reasoning, followups
 
 
 # ---------------------------------------------------------------------------
@@ -1400,7 +1466,7 @@ def _render_palomo_gpt(api_key: str) -> None:
             with st.status(
                 "🔍 Buscando información verificada...", expanded=False
             ) as status:
-                text, citations, reasoning_chain = get_palomo_response(
+                text, citations, reasoning_chain, followups = get_palomo_response(
                     query=user_prompt,
                     session_messages=msgs,
                     api_key=api_key,
@@ -1427,6 +1493,19 @@ def _render_palomo_gpt(api_key: str) -> None:
             st.error(err_msg)
             msgs.append({"role": "assistant", "content": err_msg})
             print(f"[PalomoGPT] Error:\n{traceback.format_exc()}")
+            followups = []
+
+    # Render follow-up Q&A as user/assistant chat bubbles
+    for fu in followups:
+        # User bubble for the auto-generated question
+        with st.chat_message("user"):
+            st.markdown(f"🔍 {fu['question']}")
+        msgs.append({"role": "user", "content": f"🔍 {fu['question']}"})
+
+        # Assistant bubble for the answer
+        with st.chat_message("assistant"):
+            st.markdown(fu["answer"])
+        msgs.append({"role": "assistant", "content": fu["answer"]})
 
 
 # ---------------------------------------------------------------------------
