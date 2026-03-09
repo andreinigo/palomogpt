@@ -205,6 +205,107 @@ def _auto_title(text: str) -> str:
     return clean[:60] + "…" if len(clean) > 60 else clean
 
 
+# --- Match Prep persistence helpers ---
+
+def _save_match_prep(config: dict, results: dict) -> str:
+    """Save a match prep and return its UUID."""
+    sb = _supabase_client()
+    if not sb:
+        return ""
+    try:
+        title = f"{config.get('home_team', '?')} vs {config.get('away_team', '?')}"
+        # Convert results to JSON-serializable form
+        json_results = {}
+        for key, val in results.items():
+            if isinstance(val, tuple):
+                json_results[key] = {"text": val[0], "sources": val[1]}
+            elif isinstance(val, list):
+                json_results[key] = val
+            else:
+                json_results[key] = val
+
+        row = sb.table("match_preps").insert({
+            "title": title,
+            "home_team": config.get("home_team", ""),
+            "away_team": config.get("away_team", ""),
+            "tournament": config.get("tournament", ""),
+            "match_type": config.get("match_type", ""),
+            "stadium": config.get("stadium", ""),
+            "config": config,
+            "results": json_results,
+        }).execute()
+        prep_id = row.data[0]["id"] if row.data else ""
+        print(f"[Supabase] Saved match prep: {prep_id} — '{title}'")
+        return prep_id
+    except Exception as e:
+        print(f"[Supabase] Error saving match prep: {e}")
+        return ""
+
+
+def _list_match_preps(limit: int = 20) -> List[Dict[str, Any]]:
+    """List recent match preps, newest first."""
+    sb = _supabase_client()
+    if not sb:
+        return []
+    try:
+        resp = (
+            sb.table("match_preps")
+            .select("id, title, home_team, away_team, tournament, created_at")
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return resp.data or []
+    except Exception as e:
+        print(f"[Supabase] Error listing match preps: {e}")
+        return []
+
+
+def _load_match_prep(prep_id: str) -> Optional[Dict[str, Any]]:
+    """Load a match prep's config and results."""
+    sb = _supabase_client()
+    if not sb or not prep_id:
+        return None
+    try:
+        resp = (
+            sb.table("match_preps")
+            .select("*")
+            .eq("id", prep_id)
+            .single()
+            .execute()
+        )
+        if not resp.data:
+            return None
+        row = resp.data
+        # Reconstruct results from JSONB back to tuples where needed
+        raw_results = row.get("results", {})
+        results = {}
+        for key in ("home_history", "away_history", "palomo_phrases"):
+            val = raw_results.get(key, {})
+            if isinstance(val, dict) and "text" in val:
+                results[key] = (val["text"], val.get("sources", []))
+            else:
+                results[key] = ("", [])
+        for key in ("home_roster", "away_roster"):
+            results[key] = raw_results.get(key, [])
+        return {"config": row.get("config", {}), "results": results}
+    except Exception as e:
+        print(f"[Supabase] Error loading match prep {prep_id}: {e}")
+        return None
+
+
+def _delete_match_prep(prep_id: str) -> None:
+    """Delete a match prep."""
+    sb = _supabase_client()
+    if not sb or not prep_id:
+        return
+    try:
+        sb.table("match_preps").delete().eq("id", prep_id).execute()
+        print(f"[Supabase] Deleted match prep: {prep_id}")
+    except Exception as e:
+        print(f"[Supabase] Error deleting match prep: {e}")
+
+
 # ---------------------------------------------------------------------------
 # System Prompts
 # ---------------------------------------------------------------------------
@@ -466,6 +567,25 @@ más impactantes para que sean fáciles de localizar.
 Responde en español. Sé EXHAUSTIVO y PRECISO — NO inventes datos. \
 Si no encuentras un dato específico, omítelo, pero BUSCA A FONDO antes de rendirte.
 FECHA ACTUAL: {current_date}."""
+
+
+_PLAYER_SYNTHESIS_PROMPT = """Eres el redactor de fichas de transmisión de Fernando Palomo en ESPN.
+
+Tu trabajo: recibir un dossier extenso de un jugador y sintetizarlo en una FICHA BREVE \
+de 2 a 4 líneas que el narrador pueda leer de un vistazo en cabina.
+
+FORMATO OBLIGATORIO (cada jugador):
+[número] [Nombre] [edad] años. [ciudad/país de origen].
+[Dato clave de trayectoria en 1-2 oraciones cortas: cantera, cesiones, fichajes, cifras de traspaso]
+[Situación actual: rol en el equipo, momento de forma, dato curioso memorable]
+
+REGLAS:
+- SOLO datos duros verificables. Nada de opiniones ni adjetivos floridos.
+- Prioriza: origen, trayectoria resumida (equipos + años), precio de fichaje si es relevante, posición real vs original.
+- Si hay conexión con el rival, inclúyela en una línea extra.
+- NO uses markdown, emojis, ni viñetas. Texto plano corrido, línea por línea.
+- Máximo 4 líneas por jugador. Si no hay suficiente info, 2 líneas bastan.
+- Responde en español."""
 
 
 _FACT_CHECK_PROMPT_PLAYER = """Eres el Auditor Principal de Datos de ESPN y el filtro definitivo de la verdad.
@@ -803,13 +923,27 @@ class _MatchPDF(FPDF):
             self._body_text(text, size=10)
 
 
-def generate_match_pdf(config: dict, results: dict) -> bytes:
-    """Generate a complete match preparation PDF and return it as bytes."""
+def generate_match_pdf(config: dict, results: dict, api_key: str = "") -> bytes:
+    """Generate a complete match preparation PDF.
+
+    If api_key is provided, synthesizes verbose player dossiers into compact
+    broadcast-ready notes before writing to PDF.
+    """
+
+    # Synthesize rosters before PDF generation
+    synth_results = dict(results)  # shallow copy to avoid mutating original
+    if api_key:
+        for key in ("home_roster", "away_roster"):
+            roster = results.get(key, [])
+            if roster:
+                print(f"[PDF] Synthesizing {len(roster)} players for {key}...")
+                synth_results[key] = _synthesize_roster_for_pdf(roster, api_key)
+
     pdf = _MatchPDF(config)
     pdf.add_cover()
-    pdf.add_team_histories(results)
-    pdf.add_rosters(results)
-    pdf.add_palomo_phrases(results)
+    pdf.add_team_histories(synth_results)
+    pdf.add_rosters(synth_results)
+    pdf.add_palomo_phrases(synth_results)
     # the fpdf output() sometimes returns a latin1 string instead of bytes,
     # which causes Streamlit's download_button to crash when it tries to infer the mime type.
     # Additionally, fpdf2 returns a bytearray, which Streamlit also does not support.
@@ -817,6 +951,37 @@ def generate_match_pdf(config: dict, results: dict) -> bytes:
     if isinstance(out, str):
         return out.encode('latin1')
     return bytes(out)
+
+
+def _synthesize_roster_for_pdf(
+    roster: List[Dict[str, Any]],
+    api_key: str,
+) -> List[Dict[str, Any]]:
+    """Synthesize verbose player dossiers into compact broadcast notes."""
+    synthesized = []
+    for player in roster:
+        raw_text = player.get("text", "")
+        if not raw_text or len(raw_text) < 50:
+            synthesized.append(player)
+            continue
+
+        try:
+            note, _ = _gemini_request(
+                api_key=api_key,
+                system_prompt=_PLAYER_SYNTHESIS_PROMPT,
+                user_message=f"Sintetiza este dossier:\n\n{raw_text}",
+                use_search=False,
+            )
+            synthesized.append({
+                **player,
+                "text": note.strip(),
+                "raw_text": raw_text,  # keep original for UI display
+            })
+        except Exception as e:
+            print(f"[PDF Synthesis] Error for {player.get('name', '?')}: {e}")
+            synthesized.append(player)  # fallback to raw text
+
+    return synthesized
 
 
 # ---------------------------------------------------------------------------
@@ -1518,11 +1683,35 @@ def main() -> None:
                                 st.session_state.messages = []
                             st.rerun()
         else:
-            # Match prep mode — keep simple clean/clear
-            if st.button("🗑️ Limpiar informe", use_container_width=True):
-                st.session_state.pop("match_results", None)
-                st.session_state.pop("match_config", None)
-                st.rerun()
+            # Match prep mode
+            if st.session_state.get("match_results"):
+                if st.button("➕ Nueva preparación", use_container_width=True):
+                    st.session_state.pop("match_results", None)
+                    st.session_state.pop("match_config", None)
+                    st.session_state.pop("match_pdf_bytes", None)
+                    st.rerun()
+
+            # List past match preps
+            preps = _list_match_preps()
+            if preps:
+                st.markdown("##### ⚽ Preparaciones")
+                for prep in preps:
+                    pid = prep["id"]
+                    title = prep.get("title", "Sin título")
+
+                    col_title, col_del = st.columns([5, 1])
+                    with col_title:
+                        if st.button(title, key=f"prep_{pid}", use_container_width=True):
+                            loaded = _load_match_prep(pid)
+                            if loaded:
+                                st.session_state.match_config = loaded["config"]
+                                st.session_state.match_results = loaded["results"]
+                                st.session_state.pop("match_pdf_bytes", None)
+                            st.rerun()
+                    with col_del:
+                        if st.button("🗑️", key=f"dprep_{pid}"):
+                            _delete_match_prep(pid)
+                            st.rerun()
 
         st.markdown("---")
         st.caption("🌐 Datos en tiempo real · Cualquier liga · Verificado con fuentes")
@@ -1818,9 +2007,9 @@ def _render_match_prep(api_key: str) -> None:
                     progress_cb=_progress,
                 )
                 st.session_state.match_results = results
-                status.update(label="📄 Generando archivo PDF...")
+                status.update(label="📄 Sintetizando y generando PDF...")
                 try:
-                    pdf_bytes = generate_match_pdf(st.session_state.match_config, results)
+                    pdf_bytes = generate_match_pdf(st.session_state.match_config, results, api_key=api_key)
                     st.session_state.match_pdf_bytes = pdf_bytes
                 except Exception as e:
                     print(f"[MatchPrep] Error generating PDF:\n{traceback.format_exc()}")
@@ -1831,6 +2020,12 @@ def _render_match_prep(api_key: str) -> None:
                     state="complete",
                     expanded=False,
                 )
+
+                # Auto-save to Supabase
+                try:
+                    _save_match_prep(st.session_state.match_config, results)
+                except Exception as e:
+                    print(f"[MatchPrep] Error saving to Supabase: {e}")
             except Exception as e:
                 status.update(label=f"❌ Error: {e}", state="error")
                 print(f"[MatchPrep] Error:\n{traceback.format_exc()}")
