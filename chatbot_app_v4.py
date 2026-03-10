@@ -927,12 +927,21 @@ class _MatchPDF(FPDF):
             self._body_text(text, size=10)
 
 
-def generate_match_pdf(config: dict, results: dict, api_key: str = "") -> bytes:
+def generate_match_pdf(
+    config: dict,
+    results: dict,
+    api_key: str = "",
+    progress_cb: Optional[Callable[[str], None]] = None,
+) -> bytes:
     """Generate a complete match preparation PDF.
 
     If api_key is provided, synthesizes verbose player dossiers into compact
     broadcast-ready notes before writing to PDF.
     """
+
+    def _cb(msg: str) -> None:
+        if progress_cb:
+            progress_cb(msg)
 
     # Synthesize rosters before PDF generation
     synth_results = dict(results)  # shallow copy to avoid mutating original
@@ -940,9 +949,11 @@ def generate_match_pdf(config: dict, results: dict, api_key: str = "") -> bytes:
         for key in ("home_roster", "away_roster"):
             roster = results.get(key, [])
             if roster:
-                print(f"[PDF] Synthesizing {len(roster)} players for {key}...")
-                synth_results[key] = _synthesize_roster_for_pdf(roster, api_key)
+                label = "Local" if "home" in key else "Visitante"
+                _cb(f"Sintetizando {len(roster)} jugadores ({label})...")
+                synth_results[key] = _synthesize_roster_for_pdf(roster, api_key, progress_cb=progress_cb)
 
+    _cb("Generando PDF...")
     pdf = _MatchPDF(config)
     pdf.add_cover()
     pdf.add_team_histories(synth_results)
@@ -957,42 +968,72 @@ def generate_match_pdf(config: dict, results: dict, api_key: str = "") -> bytes:
     return bytes(out)
 
 
+def _synthesize_one_player(
+    player: Dict[str, Any],
+    client: anthropic.Anthropic,
+) -> Dict[str, Any]:
+    """Synthesize a single player dossier. Called in parallel."""
+    raw_text = player.get("text", "")
+    if not raw_text or len(raw_text) < 50:
+        return player
+    try:
+        response = client.messages.create(
+            model=CLAUDE_HAIKU_MODEL,
+            max_tokens=512,
+            system=_PLAYER_SYNTHESIS_PROMPT,
+            messages=[{"role": "user", "content": f"Sintetiza este dossier:\n\n{raw_text}"}],
+        )
+        note = response.content[0].text
+        return {
+            **player,
+            "text": note.strip(),
+            "raw_text": raw_text,
+        }
+    except Exception as e:
+        print(f"[PDF Synthesis] Error for {player.get('name', '?')}: {e}")
+        return player
+
+
 def _synthesize_roster_for_pdf(
     roster: List[Dict[str, Any]],
     api_key: str,
+    progress_cb: Optional[Callable[[str], None]] = None,
 ) -> List[Dict[str, Any]]:
-    """Synthesize verbose player dossiers into compact broadcast notes via Claude Haiku."""
+    """Synthesize verbose player dossiers into compact broadcast notes via Claude Haiku.
+    
+    Uses parallel requests (up to 8 concurrent) for speed.
+    """
     claude_key = st.secrets.get("ANTHROPIC_API_KEY", "")
     if not claude_key:
         print("[PDF Synthesis] No ANTHROPIC_API_KEY — skipping synthesis.")
         return roster
 
     client = anthropic.Anthropic(api_key=claude_key)
-    synthesized = []
-    for player in roster:
-        raw_text = player.get("text", "")
-        if not raw_text or len(raw_text) < 50:
-            synthesized.append(player)
-            continue
+    synthesized: List[Optional[Dict[str, Any]]] = [None] * len(roster)
+    done_count = 0
+    total = len(roster)
 
-        try:
-            response = client.messages.create(
-                model=CLAUDE_HAIKU_MODEL,
-                max_tokens=512,
-                system=_PLAYER_SYNTHESIS_PROMPT,
-                messages=[{"role": "user", "content": f"Sintetiza este dossier:\n\n{raw_text}"}],
-            )
-            note = response.content[0].text
-            synthesized.append({
-                **player,
-                "text": note.strip(),
-                "raw_text": raw_text,  # keep original for UI display
-            })
-        except Exception as e:
-            print(f"[PDF Synthesis] Error for {player.get('name', '?')}: {e}")
-            synthesized.append(player)  # fallback to raw text
+    def _cb(msg: str) -> None:
+        if progress_cb:
+            progress_cb(msg)
 
-    return synthesized
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        future_to_idx = {
+            executor.submit(_synthesize_one_player, player, client): idx
+            for idx, player in enumerate(roster)
+        }
+        for future in as_completed(future_to_idx):
+            idx = future_to_idx[future]
+            try:
+                synthesized[idx] = future.result()
+            except Exception as e:
+                print(f"[PDF Synthesis] Unexpected error for idx {idx}: {e}")
+                synthesized[idx] = roster[idx]
+            done_count += 1
+            name = roster[idx].get("name", "?")
+            _cb(f"  ✓ {name} ({done_count}/{total})")
+
+    return [p for p in synthesized if p is not None]
 
 
 # ---------------------------------------------------------------------------
@@ -2333,15 +2374,22 @@ def _display_match_results(config: dict, results: dict) -> None:
         # Show a button to trigger PDF generation on demand
         api_key = st.secrets.get("GEMINI_API_KEY", "")
         if st.button("📄 Generar y Descargar PDF", use_container_width=True, type="primary"):
+            pdf_ok = False
             with st.status("📄 Sintetizando y generando PDF...", expanded=True) as pdf_status:
                 try:
-                    pdf_bytes = generate_match_pdf(config, results, api_key=api_key)
+                    pdf_bytes = generate_match_pdf(
+                        config, results, api_key=api_key,
+                        progress_cb=lambda msg: pdf_status.write(msg),
+                    )
                     st.session_state.match_pdf_bytes = pdf_bytes
                     pdf_status.update(label="✅ PDF generado", state="complete", expanded=False)
-                    st.rerun()  # rerun to show download button
+                    pdf_ok = True
                 except Exception as e:
                     print(f"[MatchPrep] Error generating PDF:\n{traceback.format_exc()}")
                     pdf_status.update(label=f"❌ Error generando PDF: {e}", state="error")
+            # Rerun OUTSIDE the status context so the download button appears
+            if pdf_ok:
+                st.rerun()
 
     # ---- Team Histories (side-by-side) ----
     st.markdown("### 📊 Historial de Temporadas")
