@@ -32,6 +32,7 @@ import anthropic
 GEMINI_MODEL = "gemini-3.1-pro-preview"
 GEMINI_FALLBACK_MODEL = "gemini-2.5-pro"
 CLAUDE_MODEL = "claude-opus-4-6"
+CLAUDE_HAIKU_MODEL = "claude-haiku-4-5"
 
 MODE_PALOMO_GPT = "palomo_gpt"
 MODE_MATCH_PREP = "match_prep"
@@ -960,7 +961,13 @@ def _synthesize_roster_for_pdf(
     roster: List[Dict[str, Any]],
     api_key: str,
 ) -> List[Dict[str, Any]]:
-    """Synthesize verbose player dossiers into compact broadcast notes."""
+    """Synthesize verbose player dossiers into compact broadcast notes via Claude Haiku."""
+    claude_key = st.secrets.get("ANTHROPIC_API_KEY", "")
+    if not claude_key:
+        print("[PDF Synthesis] No ANTHROPIC_API_KEY — skipping synthesis.")
+        return roster
+
+    client = anthropic.Anthropic(api_key=claude_key)
     synthesized = []
     for player in roster:
         raw_text = player.get("text", "")
@@ -969,12 +976,13 @@ def _synthesize_roster_for_pdf(
             continue
 
         try:
-            note, _ = _gemini_request(
-                api_key=api_key,
-                system_prompt=_PLAYER_SYNTHESIS_PROMPT,
-                user_message=f"Sintetiza este dossier:\n\n{raw_text}",
-                use_search=False,
+            response = client.messages.create(
+                model=CLAUDE_HAIKU_MODEL,
+                max_tokens=512,
+                system=_PLAYER_SYNTHESIS_PROMPT,
+                messages=[{"role": "user", "content": f"Sintetiza este dossier:\n\n{raw_text}"}],
             )
+            note = response.content[0].text
             synthesized.append({
                 **player,
                 "text": note.strip(),
