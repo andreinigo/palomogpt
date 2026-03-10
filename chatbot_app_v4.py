@@ -1013,11 +1013,15 @@ def _gemini_request(
         tools.append({"google_search": {}})
         tools.append({"url_context": {}})
 
-    config = types.GenerateContentConfig(
-        system_instruction=system_prompt,
-        tools=tools,
-        thinking_config=types.ThinkingConfig(thinking_level="HIGH"),
-    )
+    def _build_config(model_name: str) -> types.GenerateContentConfig:
+        """Build config — only add thinking for models that support it."""
+        kwargs: Dict[str, Any] = {
+            "system_instruction": system_prompt,
+            "tools": tools,
+        }
+        if "3.1" in model_name:
+            kwargs["thinking_config"] = types.ThinkingConfig(thinking_level="HIGH")
+        return types.GenerateContentConfig(**kwargs)
 
     contents = []
     if history:
@@ -1036,7 +1040,7 @@ def _gemini_request(
             response = client.models.generate_content(
                 model=model,
                 contents=contents,
-                config=config,
+                config=_build_config(model),
             )
 
             text = response.text or ""
