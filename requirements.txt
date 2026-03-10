@@ -3,3 +3,4 @@ streamlit
 fpdf2
 google-genai
 supabase
+anthropic
