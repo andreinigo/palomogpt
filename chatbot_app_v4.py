@@ -604,23 +604,6 @@ REGLAS:
 - Responde en español."""
 
 
-_FACT_CHECK_PROMPT_PLAYER = """Eres el Auditor Principal de Datos de ESPN y el filtro definitivo de la verdad.
-Tu misión es someter el siguiente dossier de un jugador a un riguroso proceso de FACT-CHECKING.
-
-PREMISA CRÍTICA: Los modelos de IA suelen alucinar detalles hiper-específicos (nombres de esposas, profesiones de cónyuges, anécdotas falsas de juveniles, estadísticas exactas, fechas de debut, montos de transferencias, historias inventadas con el rival).
-
-TU TRABAJO COMO AUDITOR IMPLACABLE:
-1. IDENTIFICA cada afirmación de la lista original.
-2. VERIFICA con todo tu poder de búsqueda si esos datos (especialmente la parte de vida personal, hijos, esposa y sus empleos, historias familiares, hobbies inventados o records cuestionables) son 100% ciertos.
-3. ELIMINA SIN PIEDAD cualquier dato personal, chisme o historia emotiva inventada si no puedes verificarlo en fuentes públicas confiables. (ej. Trabajos de esposas, historias de pobreza exageradas, declaraciones falsas al rival). Si dice que a la esposa le gusta "cocinar" o "estudiar" suele ser alucinación.
-4. CORRIGE cualquier dato futbolístico objetivo que sea incorrecto (ej. si dice que debutó en 2020 pero fue en 2018, pon 2018. Si las estadísticas están mal, pon las correctas).
-
-REGLA DE ORO DE PUBLICACIÓN: Es 1000 veces mejor OMITIR información personal que publicar una MENTIRA. Ante el mínimo asomo de alucinación, borra esa viñeta del documento.
-
-SALIDA REQUERIDA:
-Devuelve ÚNICAMENTE el dossier limpio y verificado. Mantén la misma estructura Markdown y estilo de narración de televisión original.
-NO TE DISCULPES, NO EXPLIQUES TUS CAMBIOS. SOLO ENTREGAME EL DOSSIER FINAL PERFECTO.
-"""
 
 _PALOMO_PHRASES_PROMPT = """Eres Fernando Palomo — EL narrador legendario de ESPN. \
 Estás preparando tus frases para la transmisión de un partido importante.
@@ -1354,18 +1337,6 @@ def _research_single_player(
         ),
     )
 
-    # Secondary Fact Checking Layer (authoritative verification via web search)
-    try:
-        clean_text, _ = _gemini_request(
-            api_key=api_key,
-            system_prompt=_FACT_CHECK_PROMPT_PLAYER,
-            user_message=f"Audita este dossier. Verifica cada dato contra fuentes confiables. Elimina lo no verificable:\n\n{text}",
-        )
-        # Guard: only accept if verifier returned substantial content
-        if len(clean_text) > len(text) * 0.3:
-            text = clean_text
-    except Exception as e:
-        print(f"[FactCheck] Error during player dossier fact check: {e}")
 
     return {
         "name": player_name,
