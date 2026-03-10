@@ -9,6 +9,7 @@ Powered by Google Gemini with Google Search grounding.
 from __future__ import annotations
 
 import traceback
+import time
 from datetime import datetime
 import json
 import re
@@ -987,6 +988,10 @@ def _synthesize_roster_for_pdf(
 # ---------------------------------------------------------------------------
 # Gemini API
 # ---------------------------------------------------------------------------
+_MAX_RETRIES = 3
+_RETRY_BASE_DELAY = 1  # seconds
+
+
 def _gemini_request(
     api_key: str,
     system_prompt: str,
@@ -997,6 +1002,7 @@ def _gemini_request(
 ) -> Tuple[str, List[Dict[str, str]]]:
     """
     Request to Gemini with optional Google Search grounding.
+    Retries up to _MAX_RETRIES times with exponential backoff.
     Returns (response_text, sources).
     """
     client = genai.Client(api_key=api_key)
@@ -1022,33 +1028,46 @@ def _gemini_request(
         )
     )
 
-    response = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=contents,
-        config=config,
-    )
+    last_error = None
+    for attempt in range(_MAX_RETRIES):
+        try:
+            response = client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=contents,
+                config=config,
+            )
 
-    text = response.text or ""
+            text = response.text or ""
 
-    # Extract sources from grounding metadata
-    sources: List[Dict[str, str]] = []
-    try:
-        candidate = response.candidates[0]
-        if candidate.grounding_metadata and candidate.grounding_metadata.grounding_chunks:
-            for chunk in candidate.grounding_metadata.grounding_chunks:
-                if chunk.web:
-                    sources.append({
-                        "title": chunk.web.title or "",
-                        "url": chunk.web.uri or "",
-                        "snippet": "",
-                    })
-    except (AttributeError, IndexError):
-        pass
+            # Extract sources from grounding metadata
+            sources: List[Dict[str, str]] = []
+            try:
+                candidate = response.candidates[0]
+                if candidate.grounding_metadata and candidate.grounding_metadata.grounding_chunks:
+                    for chunk in candidate.grounding_metadata.grounding_chunks:
+                        if chunk.web:
+                            sources.append({
+                                "title": chunk.web.title or "",
+                                "url": chunk.web.uri or "",
+                                "snippet": "",
+                            })
+            except (AttributeError, IndexError):
+                pass
 
-    # Resolve inline [N] markers into clickable superscript links
-    text = _resolve_inline_citations(text, sources)
+            # Resolve inline [N] markers into clickable superscript links
+            text = _resolve_inline_citations(text, sources)
 
-    return text, sources
+            return text, sources
+
+        except Exception as e:
+            last_error = e
+            delay = _RETRY_BASE_DELAY * (2 ** attempt)
+            print(f"[Gemini] Attempt {attempt + 1}/{_MAX_RETRIES} failed: {e}. "
+                  f"Retrying in {delay}s...")
+            if attempt < _MAX_RETRIES - 1:
+                time.sleep(delay)
+
+    raise RuntimeError(f"Gemini API failed after {_MAX_RETRIES} attempts: {last_error}")
 
 
 # ---------------------------------------------------------------------------
@@ -1364,6 +1383,16 @@ def _research_palomo_phrases(
     )
 
 
+def _has_data(val: Any) -> bool:
+    """Check if a results value has meaningful data (not empty/error)."""
+    if isinstance(val, tuple):
+        text = val[0] if val else ""
+        return bool(text) and not text.startswith("❌")
+    if isinstance(val, list):
+        return len(val) > 0
+    return bool(val)
+
+
 def run_match_preparation(
     home_team: str,
     away_team: str,
@@ -1372,20 +1401,23 @@ def run_match_preparation(
     stadium: str,
     api_key: str,
     progress_cb: Optional[Callable[[str], None]] = None,
+    partial_results: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
-    Run the full match preparation pipeline:
-      Phase 1 — parallel: team histories (2 calls)
-      Phase 2 — sequential per team: roster player-by-player
-      Phase 3 — Palomo phrases (uses Phase 1 context)
-    Returns dict with keys: home_history, away_history, home_roster,
-    away_roster, palomo_phrases.
-    home/away_history: (text, sources)
-    home/away_roster: list of {name, position, number, text, sources}
-    palomo_phrases: (text, sources)
+    Run the full match preparation pipeline with **resumability**.
+
+    If partial_results is provided, phases that already have data are
+    skipped — saving tokens and time.  Each phase incrementally saves
+    its output via the progress callback so that the caller can persist
+    intermediate state to session_state.
+
+    Phases:
+      1 — parallel: team histories (2 calls)
+      2 — sequential per team: roster player-by-player
+      3 — Palomo phrases (uses Phase 1 context)
     """
     _cb = progress_cb or (lambda _msg: None)
-    results: Dict[str, Any] = {
+    results: Dict[str, Any] = partial_results or {
         "home_history": ("", []),
         "away_history": ("", []),
         "home_roster": [],
@@ -1393,52 +1425,67 @@ def run_match_preparation(
         "palomo_phrases": ("", []),
     }
 
-    # Phase 1: team histories in parallel
-    _cb(f"📊 Investigando historial de **{home_team}** y **{away_team}**...")
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        futures = {
-            executor.submit(_research_team_history, home_team, api_key): "home_history",
-            executor.submit(_research_team_history, away_team, api_key): "away_history",
-        }
-        for future in as_completed(futures):
-            key = futures[future]
-            try:
-                results[key] = future.result()
-            except Exception as e:
-                results[key] = (f"❌ Error investigando: {e}", [])
-    _cb("✅ Historiales completados.")
+    # Phase 1: team histories in parallel (skip if already done)
+    need_home_hist = not _has_data(results.get("home_history"))
+    need_away_hist = not _has_data(results.get("away_history"))
+    if need_home_hist or need_away_hist:
+        _cb(f"📊 Investigando historial de **{home_team}** y **{away_team}**...")
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = {}
+            if need_home_hist:
+                futures[executor.submit(_research_team_history, home_team, api_key)] = "home_history"
+            if need_away_hist:
+                futures[executor.submit(_research_team_history, away_team, api_key)] = "away_history"
+            for future in as_completed(futures):
+                key = futures[future]
+                try:
+                    results[key] = future.result()
+                except Exception as e:
+                    results[key] = (f"❌ Error investigando: {e}", [])
+        _cb("✅ Historiales completados.")
+    else:
+        _cb("✅ Historiales ya disponibles — reutilizando.")
 
-    # Phase 2: rosters — player by player (sequential per team to show progress)
-    _cb(f"👥 Investigando plantilla de **{home_team}** jugador por jugador...")
-    try:
-        results["home_roster"] = _research_team_roster(
-            home_team, away_team, api_key, progress_cb=_cb,
-        )
-    except Exception as e:
-        results["home_roster"] = []
-        _cb(f"❌ Error con plantilla de {home_team}: {e}")
+    # Phase 2: rosters — player by player (skip if already done)
+    if not _has_data(results.get("home_roster")):
+        _cb(f"👥 Investigando plantilla de **{home_team}** jugador por jugador...")
+        try:
+            results["home_roster"] = _research_team_roster(
+                home_team, away_team, api_key, progress_cb=_cb,
+            )
+        except Exception as e:
+            results["home_roster"] = []
+            _cb(f"❌ Error con plantilla de {home_team}: {e}")
+    else:
+        _cb(f"✅ Plantilla de **{home_team}** ya disponible — reutilizando.")
 
-    _cb(f"👥 Investigando plantilla de **{away_team}** jugador por jugador...")
-    try:
-        results["away_roster"] = _research_team_roster(
-            away_team, home_team, api_key, progress_cb=_cb,
-        )
-    except Exception as e:
-        results["away_roster"] = []
-        _cb(f"❌ Error con plantilla de {away_team}: {e}")
+    if not _has_data(results.get("away_roster")):
+        _cb(f"👥 Investigando plantilla de **{away_team}** jugador por jugador...")
+        try:
+            results["away_roster"] = _research_team_roster(
+                away_team, home_team, api_key, progress_cb=_cb,
+            )
+        except Exception as e:
+            results["away_roster"] = []
+            _cb(f"❌ Error con plantilla de {away_team}: {e}")
+    else:
+        _cb(f"✅ Plantilla de **{away_team}** ya disponible — reutilizando.")
 
-    # Phase 3: Palomo phrases (needs history context)
-    _cb("🎙️ Generando frases de Fernando Palomo...")
-    home_context = results["home_history"][0] if isinstance(results["home_history"], tuple) else ""
-    away_context = results["away_history"][0] if isinstance(results["away_history"], tuple) else ""
+    # Phase 3: Palomo phrases (skip if already done)
+    if not _has_data(results.get("palomo_phrases")):
+        _cb("🎙️ Generando frases de Fernando Palomo...")
+        home_context = results["home_history"][0] if isinstance(results["home_history"], tuple) else ""
+        away_context = results["away_history"][0] if isinstance(results["away_history"], tuple) else ""
 
-    try:
-        results["palomo_phrases"] = _research_palomo_phrases(
-            home_team, away_team, tournament, match_type, stadium,
-            home_context, away_context, api_key,
-        )
-    except Exception as e:
-        results["palomo_phrases"] = (f"❌ Error generando frases: {e}", [])
+        try:
+            results["palomo_phrases"] = _research_palomo_phrases(
+                home_team, away_team, tournament, match_type, stadium,
+                home_context, away_context, api_key,
+            )
+        except Exception as e:
+            results["palomo_phrases"] = (f"❌ Error generando frases: {e}", [])
+    else:
+        _cb("✅ Frases de Palomo ya disponibles — reutilizando.")
 
     return results
 
@@ -1751,7 +1798,11 @@ def _render_palomo_gpt(api_key: str, incoming_query: Optional[str] = None) -> No
 
     msgs = st.session_state.messages
 
-    # Welcome screen (only when no conversation loaded)
+    # Pick up any pending query from example buttons (one-shot flag)
+    if "_pending_query" in st.session_state:
+        incoming_query = st.session_state.pop("_pending_query")
+
+    # Welcome screen — only when conversation is empty AND no new query
     if not msgs and not incoming_query:
         st.markdown(
             '<div class="welcome-card">'
@@ -1770,10 +1821,8 @@ def _render_palomo_gpt(api_key: str, incoming_query: Optional[str] = None) -> No
         for idx, example in enumerate(_EXAMPLE_QUERIES):
             with cols[idx % 3]:
                 if st.button(example, key=f"ex_{idx}", use_container_width=True):
-                    st.session_state.messages.append(
-                        {"role": "user", "content": example}
-                    )
-                    # Create conversation for example query
+                    # Store as one-shot pending query and create conversation
+                    st.session_state._pending_query = example
                     if not st.session_state.current_conv_id:
                         cid = _create_conversation(
                             mode=MODE_PALOMO_GPT,
@@ -1781,35 +1830,25 @@ def _render_palomo_gpt(api_key: str, incoming_query: Optional[str] = None) -> No
                         )
                         st.session_state.current_conv_id = cid
                     st.rerun()
-        return
-    else:
-        for msg in msgs:
-            with st.chat_message(msg["role"]):
-                st.markdown(msg.get("content", ""))
+        return  # Nothing else to render
 
-    # Use the query captured in main() (chat_input is already rendered there)
-    user_prompt = incoming_query
+    # --- Replay existing messages ---
+    for msg in msgs:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg.get("content", ""))
 
-    pending_prompt = None
-    if msgs and msgs[-1]["role"] == "user":
-        pending_prompt = msgs[-1]["content"]
+    # --- Process new query (if any) ---
+    if not incoming_query:
+        return  # No new query — just the replayed history
 
-    if user_prompt:
-        if msgs and msgs[-1]["role"] == "user":
-            msgs[-1]["content"] = user_prompt
-        else:
-            msgs.append({"role": "user", "content": user_prompt})
-        with st.chat_message("user"):
-            st.markdown(user_prompt)
+    # Append and display user message
+    msgs.append({"role": "user", "content": incoming_query})
+    with st.chat_message("user"):
+        st.markdown(incoming_query)
 
-        # Save user message to DB (conversation already created in main())
-        conv_id = st.session_state.get("current_conv_id", "")
-        _save_message(conv_id, "user", user_prompt)
-
-    elif pending_prompt:
-        user_prompt = pending_prompt
-    else:
-        return
+    # Save user message to DB
+    conv_id = st.session_state.get("current_conv_id", "")
+    _save_message(conv_id, "user", incoming_query)
 
     # Check API key
     if not api_key:
@@ -1822,16 +1861,15 @@ def _render_palomo_gpt(api_key: str, incoming_query: Optional[str] = None) -> No
             msgs.append({"role": "assistant", "content": err})
         return
 
-    conv_id = st.session_state.get("current_conv_id", "")
-
     # Get response
+    followups = []
     with st.chat_message("assistant"):
         try:
             with st.status(
                 "🔍 Buscando información verificada...", expanded=False
             ) as status:
                 text, citations, reasoning_chain, followups = get_palomo_response(
-                    query=user_prompt,
+                    query=incoming_query,
                     session_messages=msgs,
                     api_key=api_key,
                 )
@@ -1846,7 +1884,7 @@ def _render_palomo_gpt(api_key: str, incoming_query: Optional[str] = None) -> No
             msgs.append({"role": "assistant", "content": full_response})
             _save_message(conv_id, "assistant", full_response)
 
-            # Show reasoning chain as follow-up messages
+            # Show reasoning chain
             if reasoning_chain:
                 chain_text = "🧠 **Cadena de razonamiento:**\n\n" + "\n\n".join(reasoning_chain)
                 with st.chat_message("assistant"):
@@ -1894,7 +1932,28 @@ def _render_match_prep(api_key: str) -> None:
             unsafe_allow_html=True,
         )
 
-    # --- Match configuration form ---
+    # If we already have results, show them — don't show the form
+    if st.session_state.get("match_results") and st.session_state.get("match_config"):
+        existing = st.session_state.match_results
+        config = st.session_state.match_config
+
+        # Check if all phases are complete
+        all_keys = ["home_history", "away_history", "home_roster", "away_roster", "palomo_phrases"]
+        missing = [k for k in all_keys if not _has_data(existing.get(k))]
+
+        if missing:
+            st.warning(
+                f"⚠️ Análisis incompleto — faltan {len(missing)} secciones. "
+                "Puedes continuar sin perder lo ya investigado."
+            )
+            if st.button("🔄 Continuar análisis", type="primary", use_container_width=True):
+                _run_match_pipeline(config, api_key, partial_results=existing)
+                return
+
+        _display_match_results(config, existing)
+        return
+
+    # --- Match configuration form (only when no results loaded) ---
     st.markdown("### 📋 Configuración del Partido")
 
     col1, col2 = st.columns(2)
@@ -1992,55 +2051,65 @@ def _render_match_prep(api_key: str) -> None:
             "stadium": stadium,
         }
 
-        # Run research pipeline with progress
-        with st.status(
-            "🔍 Preparando informe del partido...", expanded=True
-        ) as status:
+        _run_match_pipeline(st.session_state.match_config, api_key)
 
-            def _progress(msg: str) -> None:
-                status.write(msg)
 
+def _run_match_pipeline(
+    config: dict,
+    api_key: str,
+    partial_results: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Run (or resume) the match preparation research pipeline."""
+    home_team = config["home_team"]
+    away_team = config["away_team"]
+
+    label = "� Continuando análisis..." if partial_results else "�🔍 Preparando informe del partido..."
+    with st.status(label, expanded=True) as status:
+
+        def _progress(msg: str) -> None:
+            status.write(msg)
+
+        try:
+            results = run_match_preparation(
+                home_team=home_team,
+                away_team=away_team,
+                tournament=config["tournament"],
+                match_type=config["match_type"],
+                stadium=config["stadium"],
+                api_key=api_key,
+                progress_cb=_progress,
+                partial_results=partial_results,
+            )
+            st.session_state.match_results = results
+            status.update(label="📄 Sintetizando y generando PDF...")
             try:
-                results = run_match_preparation(
-                    home_team=home_team,
-                    away_team=away_team,
-                    tournament=tournament,
-                    match_type=match_type,
-                    stadium=stadium,
-                    api_key=api_key,
-                    progress_cb=_progress,
-                )
-                st.session_state.match_results = results
-                status.update(label="📄 Sintetizando y generando PDF...")
-                try:
-                    pdf_bytes = generate_match_pdf(st.session_state.match_config, results, api_key=api_key)
-                    st.session_state.match_pdf_bytes = pdf_bytes
-                except Exception as e:
-                    print(f"[MatchPrep] Error generating PDF:\n{traceback.format_exc()}")
-                    st.session_state.match_pdf_bytes = None
-
-                status.update(
-                    label="✅ ¡Informe completo! Desplázate hacia abajo para verlo.",
-                    state="complete",
-                    expanded=False,
-                )
-
-                # Auto-save to Supabase
-                try:
-                    _save_match_prep(st.session_state.match_config, results)
-                except Exception as e:
-                    print(f"[MatchPrep] Error saving to Supabase: {e}")
+                pdf_bytes = generate_match_pdf(config, results, api_key=api_key)
+                st.session_state.match_pdf_bytes = pdf_bytes
             except Exception as e:
-                status.update(label=f"❌ Error: {e}", state="error")
-                print(f"[MatchPrep] Error:\n{traceback.format_exc()}")
-                return
+                print(f"[MatchPrep] Error generating PDF:\n{traceback.format_exc()}")
+                st.session_state.match_pdf_bytes = None
 
-    # --- Display persisted results ---
-    if st.session_state.get("match_results") and st.session_state.get("match_config"):
-        _display_match_results(
-            st.session_state.match_config,
-            st.session_state.match_results,
-        )
+            status.update(
+                label="✅ ¡Informe completo!",
+                state="complete",
+                expanded=False,
+            )
+
+            # Auto-save to Supabase
+            try:
+                _save_match_prep(config, results)
+            except Exception as e:
+                print(f"[MatchPrep] Error saving to Supabase: {e}")
+        except Exception as e:
+            # Save whatever partial results we have so user can resume
+            if partial_results:
+                st.session_state.match_results = partial_results
+            status.update(label=f"❌ Error: {e} — puedes continuar el análisis", state="error")
+            print(f"[MatchPrep] Error:\n{traceback.format_exc()}")
+            return
+
+    # Rerun to show results (hides form, shows results)
+    st.rerun()
 
 
 def _render_roster_players(roster: list) -> None:
