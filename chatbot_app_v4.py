@@ -23,12 +23,14 @@ from google.genai import types
 from fpdf import FPDF
 from supabase import create_client, Client as SupabaseClient
 from io import BytesIO
+import anthropic
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 GEMINI_MODEL = "gemini-3.1-pro-preview"
 GEMINI_FALLBACK_MODEL = "gemini-2.5-pro"
+CLAUDE_MODEL = "claude-opus-4-6"
 
 MODE_PALOMO_GPT = "palomo_gpt"
 MODE_MATCH_PREP = "match_prep"
@@ -1069,12 +1071,22 @@ def _gemini_request(
             last_error = e
             err_str = str(e)
 
-            # On 429 quota exhausted, immediately downgrade model
+            # On 429 quota exhausted, try Claude first, then Gemini fallback
             if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
-                if model != GEMINI_FALLBACK_MODEL:
+                # Try Claude Opus as first fallback
+                if model == GEMINI_MODEL:
+                    try:
+                        print(f"[Gemini] 429 quota hit on {model} — trying Claude Opus 4.6...")
+                        return _claude_request(system_prompt, user_message, history)
+                    except Exception as claude_err:
+                        print(f"[Claude] Fallback failed: {claude_err} — downgrading to {GEMINI_FALLBACK_MODEL}")
+                        model = GEMINI_FALLBACK_MODEL
+                        time.sleep(1)
+                        continue
+                elif model != GEMINI_FALLBACK_MODEL:
                     print(f"[Gemini] 429 quota hit on {model} — downgrading to {GEMINI_FALLBACK_MODEL}")
                     model = GEMINI_FALLBACK_MODEL
-                    time.sleep(1)  # brief pause before retry with new model
+                    time.sleep(1)
                     continue
 
             delay = _RETRY_BASE_DELAY * (2 ** attempt)
@@ -1084,6 +1096,53 @@ def _gemini_request(
                 time.sleep(delay)
 
     raise RuntimeError(f"Gemini API failed after {_MAX_RETRIES} attempts: {last_error}")
+
+
+def _claude_request(
+    system_prompt: str,
+    user_message: str,
+    history: Optional[list] = None,
+) -> Tuple[str, List[Dict[str, str]]]:
+    """
+    Fallback request via Claude Opus 4.6.
+    No search grounding — purely LLM reasoning.
+    Returns (response_text, sources=[]).
+    """
+    claude_key = st.secrets.get("ANTHROPIC_API_KEY", "")
+    if not claude_key:
+        raise RuntimeError("ANTHROPIC_API_KEY not configured")
+
+    client = anthropic.Anthropic(api_key=claude_key)
+
+    # Build messages from history + current user message
+    messages: List[Dict[str, str]] = []
+    if history:
+        for content in history:
+            try:
+                role = "user" if content.role == "user" else "assistant"
+                text_parts = [p.text for p in content.parts if hasattr(p, "text") and p.text]
+                if text_parts:
+                    messages.append({"role": role, "content": "\n".join(text_parts)})
+            except (AttributeError, TypeError):
+                pass
+    messages.append({"role": "user", "content": user_message})
+
+    print(f"[Claude] Calling {CLAUDE_MODEL} as fallback...")
+    response = client.messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=16384,
+        system=system_prompt,
+        messages=messages,
+        tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}],
+    )
+
+    text = ""
+    for block in response.content:
+        if hasattr(block, "text"):
+            text += block.text
+
+    print(f"[Claude] Response received ({len(text)} chars)")
+    return text, []  # no grounding sources from Claude
 
 
 # ---------------------------------------------------------------------------
@@ -1409,6 +1468,62 @@ def _has_data(val: Any) -> bool:
     return bool(val)
 
 
+def _roster_has_failures(roster: list) -> bool:
+    """Check if any players in a roster have error text."""
+    return any(
+        p.get("text", "").startswith("❌")
+        for p in roster
+    )
+
+
+def _retry_failed_roster_players(
+    roster: List[Dict[str, Any]],
+    team_name: str,
+    opponent_name: str,
+    api_key: str,
+    progress_cb: Optional[Callable[[str], None]] = None,
+) -> List[Dict[str, Any]]:
+    """Re-research only the players that have error text in their dossier."""
+    _cb = progress_cb or (lambda _msg: None)
+    failed_indices = [
+        i for i, p in enumerate(roster)
+        if p.get("text", "").startswith("❌")
+    ]
+    if not failed_indices:
+        return roster
+
+    total_failed = len(failed_indices)
+    _cb(f"🔄 Re-investigando **{total_failed}** jugadores fallidos de **{team_name}**...")
+
+    batch_size = 4
+    completed = 0
+    for batch_start in range(0, total_failed, batch_size):
+        batch_idxs = failed_indices[batch_start : batch_start + batch_size]
+        with ThreadPoolExecutor(max_workers=batch_size) as executor:
+            future_to_idx = {
+                executor.submit(
+                    _research_single_player,
+                    roster[idx],  # use existing player info (name, position, number)
+                    team_name,
+                    opponent_name,
+                    api_key,
+                ): idx
+                for idx in batch_idxs
+            }
+            for future in as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                try:
+                    roster[idx] = future.result()
+                except Exception as e:
+                    # Keep the error but update it
+                    roster[idx]["text"] = f"❌ Error investigando: {e}"
+                completed += 1
+                pname = roster[idx].get("name", "?")
+                _cb(f"🔄 [{completed}/{total_failed}] **{pname}** ✓  ({team_name})")
+
+    return roster
+
+
 def run_match_preparation(
     home_team: str,
     away_team: str,
@@ -1472,6 +1587,10 @@ def run_match_preparation(
         except Exception as e:
             results["home_roster"] = []
             _cb(f"❌ Error con plantilla de {home_team}: {e}")
+    elif _roster_has_failures(results.get("home_roster", [])):
+        results["home_roster"] = _retry_failed_roster_players(
+            results["home_roster"], home_team, away_team, api_key, progress_cb=_cb,
+        )
     else:
         _cb(f"✅ Plantilla de **{home_team}** ya disponible — reutilizando.")
 
@@ -1484,6 +1603,10 @@ def run_match_preparation(
         except Exception as e:
             results["away_roster"] = []
             _cb(f"❌ Error con plantilla de {away_team}: {e}")
+    elif _roster_has_failures(results.get("away_roster", [])):
+        results["away_roster"] = _retry_failed_roster_players(
+            results["away_roster"], away_team, home_team, api_key, progress_cb=_cb,
+        )
     else:
         _cb(f"✅ Plantilla de **{away_team}** ya disponible — reutilizando.")
 
@@ -1956,10 +2079,25 @@ def _render_match_prep(api_key: str) -> None:
         # Check if all phases are complete
         all_keys = ["home_history", "away_history", "home_roster", "away_roster", "palomo_phrases"]
         missing = [k for k in all_keys if not _has_data(existing.get(k))]
+        # Also check for individual player failures within rosters
+        has_player_failures = (
+            _roster_has_failures(existing.get("home_roster", []))
+            or _roster_has_failures(existing.get("away_roster", []))
+        )
+        is_incomplete = bool(missing) or has_player_failures
 
-        if missing:
+        if is_incomplete:
+            n_failed_players = sum(
+                1 for r in (existing.get("home_roster", []) + existing.get("away_roster", []))
+                if isinstance(r, dict) and r.get("text", "").startswith("❌")
+            )
+            parts = []
+            if missing:
+                parts.append(f"faltan {len(missing)} secciones")
+            if n_failed_players:
+                parts.append(f"{n_failed_players} jugadores con error")
             st.warning(
-                f"⚠️ Análisis incompleto — faltan {len(missing)} secciones. "
+                f"⚠️ Análisis incompleto — {', '.join(parts)}. "
                 "Puedes continuar sin perder lo ya investigado."
             )
             if st.button("🔄 Continuar análisis", type="primary", use_container_width=True):
