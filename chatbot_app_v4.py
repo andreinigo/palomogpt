@@ -28,6 +28,7 @@ from io import BytesIO
 # Constants
 # ---------------------------------------------------------------------------
 GEMINI_MODEL = "gemini-3.1-pro-preview"
+GEMINI_FALLBACK_MODEL = "gemini-2.5-pro"
 
 MODE_PALOMO_GPT = "palomo_gpt"
 MODE_MATCH_PREP = "match_prep"
@@ -1029,10 +1030,11 @@ def _gemini_request(
     )
 
     last_error = None
+    model = GEMINI_MODEL
     for attempt in range(_MAX_RETRIES):
         try:
             response = client.models.generate_content(
-                model=GEMINI_MODEL,
+                model=model,
                 contents=contents,
                 config=config,
             )
@@ -1061,6 +1063,16 @@ def _gemini_request(
 
         except Exception as e:
             last_error = e
+            err_str = str(e)
+
+            # On 429 quota exhausted, immediately downgrade model
+            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                if model != GEMINI_FALLBACK_MODEL:
+                    print(f"[Gemini] 429 quota hit on {model} — downgrading to {GEMINI_FALLBACK_MODEL}")
+                    model = GEMINI_FALLBACK_MODEL
+                    time.sleep(1)  # brief pause before retry with new model
+                    continue
+
             delay = _RETRY_BASE_DELAY * (2 ** attempt)
             print(f"[Gemini] Attempt {attempt + 1}/{_MAX_RETRIES} failed: {e}. "
                   f"Retrying in {delay}s...")
