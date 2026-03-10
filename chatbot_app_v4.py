@@ -212,7 +212,8 @@ def _auto_title(text: str) -> str:
 # --- Match Prep persistence helpers ---
 
 def _save_match_prep(config: dict, results: dict) -> str:
-    """Save a match prep and return its UUID."""
+    """Save or update a match prep and return its UUID.
+    Uses session_state.match_prep_id to track the existing row."""
     sb = _supabase_client()
     if not sb:
         return ""
@@ -228,7 +229,7 @@ def _save_match_prep(config: dict, results: dict) -> str:
             else:
                 json_results[key] = val
 
-        row = sb.table("match_preps").insert({
+        payload = {
             "title": title,
             "home_team": config.get("home_team", ""),
             "away_team": config.get("away_team", ""),
@@ -237,10 +238,21 @@ def _save_match_prep(config: dict, results: dict) -> str:
             "stadium": config.get("stadium", ""),
             "config": config,
             "results": json_results,
-        }).execute()
-        prep_id = row.data[0]["id"] if row.data else ""
-        print(f"[Supabase] Saved match prep: {prep_id} — '{title}'")
-        return prep_id
+        }
+
+        existing_id = st.session_state.get("match_prep_id")
+        if existing_id:
+            # Update existing row
+            sb.table("match_preps").update(payload).eq("id", existing_id).execute()
+            print(f"[Supabase] Updated match prep: {existing_id} — '{title}'")
+            return existing_id
+        else:
+            # Insert new row
+            row = sb.table("match_preps").insert(payload).execute()
+            prep_id = row.data[0]["id"] if row.data else ""
+            st.session_state.match_prep_id = prep_id
+            print(f"[Supabase] Saved match prep: {prep_id} — '{title}'")
+            return prep_id
     except Exception as e:
         print(f"[Supabase] Error saving match prep: {e}")
         return ""
@@ -1896,6 +1908,7 @@ def main() -> None:
                             if loaded:
                                 st.session_state.match_config = loaded["config"]
                                 st.session_state.match_results = loaded["results"]
+                                st.session_state.match_prep_id = pid  # track for upsert
                                 st.session_state.pop("match_pdf_bytes", None)
                             st.rerun()
                     with col_del:
@@ -2217,7 +2230,7 @@ def _run_match_pipeline(
     home_team = config["home_team"]
     away_team = config["away_team"]
 
-    label = "� Continuando análisis..." if partial_results else "�🔍 Preparando informe del partido..."
+    label = "🔄 Continuando análisis..." if partial_results else "🔍 Preparando informe del partido..."
     with st.status(label, expanded=True) as status:
 
         def _progress(msg: str) -> None:
@@ -2258,11 +2271,15 @@ def _run_match_pipeline(
             # Save whatever partial results we have so user can resume
             if partial_results:
                 st.session_state.match_results = partial_results
+                # Also persist partial results to Supabase
+                try:
+                    _save_match_prep(config, partial_results)
+                except Exception:
+                    pass
             status.update(label=f"❌ Error: {e} — puedes continuar el análisis", state="error")
             print(f"[MatchPrep] Error:\n{traceback.format_exc()}")
-            return
 
-    # Rerun to show results (hides form, shows results)
+    # Always rerun to refresh display with latest data
     st.rerun()
 
 
