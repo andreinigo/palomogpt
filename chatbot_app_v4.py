@@ -7,6 +7,7 @@
 Powered by Google Gemini with Google Search grounding.
 """
 from __future__ import annotations
+import unicodedata
 
 import traceback
 import time
@@ -765,6 +766,9 @@ def _clean_for_latin(text: str) -> str:
     }
     for char, repl in replacements.items():
         text = text.replace(char, repl)
+    # Normalize accented characters to their closest ASCII+combining form,
+    # then drop combining marks — keeps "Müller" as "Muller" instead of "".
+    text = unicodedata.normalize('NFKD', text)
     # Fast fallback: replace any remaining non-latin1 chars
     return text.encode('latin-1', errors='ignore').decode('latin-1')
 
@@ -2219,13 +2223,7 @@ def _run_match_pipeline(
                 partial_results=partial_results,
             )
             st.session_state.match_results = results
-            status.update(label="📄 Sintetizando y generando PDF...")
-            try:
-                pdf_bytes = generate_match_pdf(config, results, api_key=api_key)
-                st.session_state.match_pdf_bytes = pdf_bytes
-            except Exception as e:
-                print(f"[MatchPrep] Error generating PDF:\n{traceback.format_exc()}")
-                st.session_state.match_pdf_bytes = None
+            st.session_state.pop("match_pdf_bytes", None)  # clear stale PDF
 
             status.update(
                 label="✅ ¡Informe completo!",
@@ -2309,11 +2307,13 @@ def _display_match_results(config: dict, results: dict) -> None:
         unsafe_allow_html=True,
     )
 
-    # ---- PDF download button ----
+    # ---- On-demand PDF generation ----
+    safe_home = re.sub(r'[^\w\s-]', '', home).strip().replace(' ', '_')
+    safe_away = re.sub(r'[^\w\s-]', '', away).strip().replace(' ', '_')
+    pdf_filename = f"Preparacion_{safe_home}_vs_{safe_away}.pdf"
+
     if st.session_state.get("match_pdf_bytes"):
-        safe_home = re.sub(r'[^\w\s-]', '', home).strip().replace(' ', '_')
-        safe_away = re.sub(r'[^\w\s-]', '', away).strip().replace(' ', '_')
-        pdf_filename = f"Preparacion_{safe_home}_vs_{safe_away}.pdf"
+        # PDF already generated — show download button
         st.download_button(
             label="📥 Descargar PDF del Informe",
             data=st.session_state.match_pdf_bytes,
@@ -2322,7 +2322,18 @@ def _display_match_results(config: dict, results: dict) -> None:
             use_container_width=True,
         )
     else:
-        st.warning("⚠️ No se pudo generar el PDF en este momento. El informe completo se muestra a continuación.")
+        # Show a button to trigger PDF generation on demand
+        api_key = st.secrets.get("GEMINI_API_KEY", "")
+        if st.button("📄 Generar y Descargar PDF", use_container_width=True, type="primary"):
+            with st.status("📄 Sintetizando y generando PDF...", expanded=True) as pdf_status:
+                try:
+                    pdf_bytes = generate_match_pdf(config, results, api_key=api_key)
+                    st.session_state.match_pdf_bytes = pdf_bytes
+                    pdf_status.update(label="✅ PDF generado", state="complete", expanded=False)
+                    st.rerun()  # rerun to show download button
+                except Exception as e:
+                    print(f"[MatchPrep] Error generating PDF:\n{traceback.format_exc()}")
+                    pdf_status.update(label=f"❌ Error generando PDF: {e}", state="error")
 
     # ---- Team Histories (side-by-side) ----
     st.markdown("### 📊 Historial de Temporadas")
