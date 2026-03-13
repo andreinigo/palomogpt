@@ -34,16 +34,18 @@ GEMINI_FALLBACK_MODEL = "gemini-2.5-pro"
 CLAUDE_MODEL = "claude-opus-4-6"
 CLAUDE_HAIKU_MODEL = "claude-haiku-4-5"
 
-MODE_PALOMO_GPT     = "palomo_gpt"
-MODE_MATCH_PREP     = "match_prep"
+MODE_PALOMO_GPT      = "palomo_gpt"
+MODE_MATCH_PREP      = "match_prep"
 MODE_MATCH_RESEARCH  = "match_research"
 MODE_PLAYER_RESEARCH = "player_research"
+MODE_SELECCIONES     = "selecciones"
 
 MODE_OPTIONS = {
     MODE_PALOMO_GPT:      "🎙️ PalomoGPT",
     MODE_MATCH_PREP:      "⚽ Investigar Partido",
     MODE_MATCH_RESEARCH:  "🔬 Investigar Equipo",
     MODE_PLAYER_RESEARCH: "🧑 Investigar Jugador",
+    MODE_SELECCIONES:     "🌍 Selecciones",
 }
 
 CURRENT_YEAR = datetime.now().year
@@ -93,7 +95,40 @@ MATCH_TYPE_OPTIONS = [
     "Amistoso",
 ]
 
-# ---------------------------------------------------------------------------
+CONFEDERATION_OPTIONS = [
+    "(Cualquier confederación)",
+    "UEFA — Europa",
+    "CONMEBOL — Sudamérica",
+    "CONCACAF — N&C América",
+    "CAF — África",
+    "AFC — Asia",
+    "OFC — Oceanía",
+]
+
+NATIONAL_TOURNAMENT_OPTIONS = [
+    "Copa del Mundo FIFA",
+    "Copa América",
+    "UEFA EURO",
+    "Copa Africana de Naciones (AFCON)",
+    "Copa de Asia AFC",
+    "Gold Cup (CONCACAF)",
+    "Liga de Naciones UEFA",
+    "Liga de Naciones CONCACAF",
+    "Clasificatoria Mundialista — CONMEBOL",
+    "Clasificatoria Mundialista — UEFA",
+    "Clasificatoria Mundialista — CAF",
+    "Clasificatoria Mundialista — CONCACAF",
+    "Clasificatoria Mundialista — AFC",
+    "Amistoso Internacional",
+    "Juegos Olímpicos",
+    "Sub-20 (FIFA World Cup)",
+    "Sub-17 (FIFA World Cup)",
+]
+
+# Sub-mode indices for MODE_SELECCIONES tabs
+SEL_TAB_SELECCION = 0
+SEL_TAB_PARTIDO   = 1
+SEL_TAB_CONVOCADO = 2
 # Supabase persistence helpers
 # ---------------------------------------------------------------------------
 
@@ -535,6 +570,307 @@ def _delete_player_research(research_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# National Team Research persistence helpers
+# ---------------------------------------------------------------------------
+
+def _save_national_team_research(config: dict, results: dict) -> str:
+    """Save or update a national team research and return its UUID."""
+    sb = _supabase_client()
+    if not sb:
+        return ""
+    try:
+        title = config.get("country", "?")
+        json_results: dict = {}
+        for key, val in results.items():
+            if isinstance(val, tuple):
+                json_results[key] = {"text": val[0], "sources": val[1]}
+            elif isinstance(val, list):
+                json_results[key] = val
+            else:
+                json_results[key] = val
+        payload = {
+            "title": title,
+            "country": config.get("country", ""),
+            "confederation": config.get("confederation", ""),
+            "config": config,
+            "results": json_results,
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+        existing_id = st.session_state.get("nat_team_research_id")
+        if existing_id:
+            sb.table("national_team_researches").update(payload).eq("id", existing_id).execute()
+            print(f"[Supabase] Updated national team research: {existing_id} — '{title}'")
+            return existing_id
+        else:
+            row = sb.table("national_team_researches").insert(payload).execute()
+            res_id = row.data[0]["id"] if row.data else ""
+            st.session_state.nat_team_research_id = res_id
+            print(f"[Supabase] Saved national team research: {res_id} — '{title}'")
+            return res_id
+    except Exception as e:
+        print(f"[Supabase] Error saving national team research: {e}")
+        return ""
+
+
+def _list_national_team_researches(limit: int = 20) -> List[Dict[str, Any]]:
+    sb = _supabase_client()
+    if not sb:
+        return []
+    try:
+        resp = (
+            sb.table("national_team_researches")
+            .select("id, title, country, confederation, created_at")
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return resp.data or []
+    except Exception as e:
+        print(f"[Supabase] Error listing national team researches: {e}")
+        return []
+
+
+def _load_national_team_research(research_id: str) -> Optional[Dict[str, Any]]:
+    sb = _supabase_client()
+    if not sb or not research_id:
+        return None
+    try:
+        resp = (
+            sb.table("national_team_researches")
+            .select("*")
+            .eq("id", research_id)
+            .single()
+            .execute()
+        )
+        if not resp.data:
+            return None
+        row = resp.data
+        raw = row.get("results", {})
+        results: dict = {}
+        val = raw.get("team_history", {})
+        if isinstance(val, dict) and "text" in val:
+            results["team_history"] = (val["text"], val.get("sources", []))
+        else:
+            results["team_history"] = ("", [])
+        results["roster"] = raw.get("roster", [])
+        return {"config": row.get("config", {}), "results": results}
+    except Exception as e:
+        print(f"[Supabase] Error loading national team research {research_id}: {e}")
+        return None
+
+
+def _delete_national_team_research(research_id: str) -> None:
+    sb = _supabase_client()
+    if not sb or not research_id:
+        return
+    try:
+        sb.table("national_team_researches").delete().eq("id", research_id).execute()
+        print(f"[Supabase] Deleted national team research: {research_id}")
+    except Exception as e:
+        print(f"[Supabase] Error deleting national team research: {e}")
+
+
+# --- National Match Prep persistence helpers ---
+
+def _save_national_match_prep(config: dict, results: dict) -> str:
+    """Save or update a national team match prep and return its UUID."""
+    sb = _supabase_client()
+    if not sb:
+        return ""
+    try:
+        home = config.get("home_country", "?")
+        away = config.get("away_country", "?")
+        title = f"{home} vs {away}"
+        json_results: dict = {}
+        for key, val in results.items():
+            if isinstance(val, tuple):
+                json_results[key] = {"text": val[0], "sources": val[1]}
+            elif isinstance(val, list):
+                json_results[key] = val
+            else:
+                json_results[key] = val
+        payload = {
+            "title": title,
+            "home_country": home,
+            "away_country": away,
+            "tournament": config.get("tournament", ""),
+            "config": config,
+            "results": json_results,
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+        existing_id = st.session_state.get("nat_match_prep_id")
+        if existing_id:
+            sb.table("national_match_preps").update(payload).eq("id", existing_id).execute()
+            print(f"[Supabase] Updated national match prep: {existing_id} — '{title}'")
+            return existing_id
+        else:
+            row = sb.table("national_match_preps").insert(payload).execute()
+            res_id = row.data[0]["id"] if row.data else ""
+            st.session_state.nat_match_prep_id = res_id
+            print(f"[Supabase] Saved national match prep: {res_id} — '{title}'")
+            return res_id
+    except Exception as e:
+        print(f"[Supabase] Error saving national match prep: {e}")
+        return ""
+
+
+def _list_national_match_preps(limit: int = 20) -> List[Dict[str, Any]]:
+    sb = _supabase_client()
+    if not sb:
+        return []
+    try:
+        resp = (
+            sb.table("national_match_preps")
+            .select("id, title, home_country, away_country, tournament, created_at")
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return resp.data or []
+    except Exception as e:
+        print(f"[Supabase] Error listing national match preps: {e}")
+        return []
+
+
+def _load_national_match_prep(prep_id: str) -> Optional[Dict[str, Any]]:
+    sb = _supabase_client()
+    if not sb or not prep_id:
+        return None
+    try:
+        resp = (
+            sb.table("national_match_preps")
+            .select("*")
+            .eq("id", prep_id)
+            .single()
+            .execute()
+        )
+        if not resp.data:
+            return None
+        row = resp.data
+        raw = row.get("results", {})
+        results: dict = {}
+        for key in ("home_history", "away_history", "palomo_phrases"):
+            val = raw.get(key, {})
+            if isinstance(val, dict) and "text" in val:
+                results[key] = (val["text"], val.get("sources", []))
+            else:
+                results[key] = ("", [])
+        results["home_roster"] = raw.get("home_roster", [])
+        results["away_roster"] = raw.get("away_roster", [])
+        return {"config": row.get("config", {}), "results": results}
+    except Exception as e:
+        print(f"[Supabase] Error loading national match prep {prep_id}: {e}")
+        return None
+
+
+def _delete_national_match_prep(prep_id: str) -> None:
+    sb = _supabase_client()
+    if not sb or not prep_id:
+        return
+    try:
+        sb.table("national_match_preps").delete().eq("id", prep_id).execute()
+        print(f"[Supabase] Deleted national match prep: {prep_id}")
+    except Exception as e:
+        print(f"[Supabase] Error deleting national match prep: {e}")
+
+
+# --- National Player Research persistence helpers ---
+
+def _save_national_player_research(config: dict, results: dict) -> str:
+    """Save or update a national player research and return its UUID."""
+    sb = _supabase_client()
+    if not sb:
+        return ""
+    try:
+        title = config.get("player_name", "?")
+        json_results: dict = {}
+        for key, val in results.items():
+            if isinstance(val, tuple):
+                json_results[key] = {"text": val[0], "sources": val[1]}
+            else:
+                json_results[key] = val
+        payload = {
+            "title": title,
+            "player_name": config.get("player_name", ""),
+            "country": config.get("country", ""),
+            "config": config,
+            "results": json_results,
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+        existing_id = st.session_state.get("nat_player_research_id")
+        if existing_id:
+            sb.table("national_player_researches").update(payload).eq("id", existing_id).execute()
+            print(f"[Supabase] Updated national player research: {existing_id} — '{title}'")
+            return existing_id
+        else:
+            row = sb.table("national_player_researches").insert(payload).execute()
+            res_id = row.data[0]["id"] if row.data else ""
+            st.session_state.nat_player_research_id = res_id
+            print(f"[Supabase] Saved national player research: {res_id} — '{title}'")
+            return res_id
+    except Exception as e:
+        print(f"[Supabase] Error saving national player research: {e}")
+        return ""
+
+
+def _list_national_player_researches(limit: int = 20) -> List[Dict[str, Any]]:
+    sb = _supabase_client()
+    if not sb:
+        return []
+    try:
+        resp = (
+            sb.table("national_player_researches")
+            .select("id, title, player_name, country, created_at")
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return resp.data or []
+    except Exception as e:
+        print(f"[Supabase] Error listing national player researches: {e}")
+        return []
+
+
+def _load_national_player_research(research_id: str) -> Optional[Dict[str, Any]]:
+    sb = _supabase_client()
+    if not sb or not research_id:
+        return None
+    try:
+        resp = (
+            sb.table("national_player_researches")
+            .select("*")
+            .eq("id", research_id)
+            .single()
+            .execute()
+        )
+        if not resp.data:
+            return None
+        row = resp.data
+        raw = row.get("results", {})
+        results: dict = {}
+        val = raw.get("dossier", {})
+        if isinstance(val, dict) and "text" in val:
+            results["dossier"] = (val["text"], val.get("sources", []))
+        else:
+            results["dossier"] = ("", [])
+        return {"config": row.get("config", {}), "results": results}
+    except Exception as e:
+        print(f"[Supabase] Error loading national player research {research_id}: {e}")
+        return None
+
+
+def _delete_national_player_research(research_id: str) -> None:
+    sb = _supabase_client()
+    if not sb or not research_id:
+        return
+    try:
+        sb.table("national_player_researches").delete().eq("id", research_id).execute()
+        print(f"[Supabase] Deleted national player research: {research_id}")
+    except Exception as e:
+        print(f"[Supabase] Error deleting national player research: {e}")
+
+
+# ---------------------------------------------------------------------------
 # System Prompts
 # ---------------------------------------------------------------------------
 
@@ -877,6 +1213,162 @@ Resalta con 🎯 los datos curiosos más impactantes para que sean fáciles de l
 Responde en español. Sé EXHAUSTIVO y PRECISO — NO inventes datos. \
 Si no encuentras un dato específico, omítelo, pero BUSCA A FONDO antes de rendirte.
 FECHA ACTUAL: {current_date}."""
+
+
+# ---------------------------------------------------------------------------
+# National Team Prompts
+# ---------------------------------------------------------------------------
+
+_NATIONAL_TEAM_HISTORY_PROMPT = """Eres un cronista histórico de selecciones nacionales con acceso \
+a toda la hemeroteca del fútbol internacional. Tu misión: construir la ficha DEFINITIVA de una \
+selección nacional para que Fernando Palomo pueda narrar con autoridad total.
+
+SELECCIÓN: **{country}** | Confederación: {confederation}
+
+Investiga A FONDO los siguientes bloques:
+
+1. **📋 DATOS GENERALES**
+   - Federación, confederación, fundación, sede, colores, apodo(s)
+   - Entrenador actual + tiempo en el cargo + récord bajo su mando
+   - Capitán actual + quién le sigue en jerarquía
+   - Sistema táctico actual y variaciones
+
+2. **🏆 HISTORIA EN MUNDIALES**
+   - Participaciones totales, primera y más reciente clasificación
+   - Mejor resultado en Copa del Mundo + edición + rivales en ese camino
+   - Mundiales donde NO clasificaron que sorprendieron
+   - Goleadores históricos en Mundiales
+   - Partidos icónicos (victorias y derrotas que definieron una era)
+
+3. **🌍 HISTORIA EN TORNEOS CONTINENTALES**
+   - Copas América / EURO / AFCON / Copa de Asia / Gold Cup ganadas y en qué años
+   - Rachas relevantes (más participaciones consecutivas, más finales seguidas, etc.)
+   - Rivales constantes / rivalidades históricas continentales
+
+4. **📊 CLASIFICATORIAS EN CURSO** (si aplica)
+   - Confederación y formato de clasificatoria actual para el próximo Mundial
+   - Posición actual en la tabla, puntos, partidos restantes
+   - Resultados de los últimos 5 partidos (forma reciente)
+   - Próximos 3 rivales en clasificatoria
+
+5. **📌 ESTADÍSTICAS HISTÓRICAS**
+   - Máximo goleador histórico: nombre, goles, años activo
+   - Más partidos internacionales (caps): nombre, número de caps
+   - Portero con más vallas invictas, si aplica
+   - Racha invicta más larga
+
+6. **🎭 DATOS CURIOSOS Y CULTURA**
+   - Apodos del equipo y su origen
+   - Ritual o himno especial de la selección
+   - Héroes históricos que marcaron generaciones
+   - Momentos virales o polémicos (positivos o negativos)
+   - Relación de la selección con su afición y cómo se vive el fútbol en el país
+   - Estadio o sede más representativa y su capacidad/ambiente
+
+Resalta con 🏆 los hitos más importantes para facilitar la lectura.
+Responde en español. Sé EXHAUSTIVO. NO inventes cifras.
+FECHA ACTUAL: {current_date}."""
+
+
+_NATIONAL_PLAYER_DOSSIER_PROMPT = """Eres el investigador oficial de la selección de {country} \
+para la transmisión de ESPN. Tu misión: dossier COMPLETO de uno de sus convocados para que \
+Fernando Palomo narre con datos frescos y profundidad real.
+
+JUGADOR: **{player_name}** — Selección de **{country}**
+
+Investiga A FONDO los siguientes aspectos:
+
+1. **🎽 IDENTIDAD INTERNACIONAL**
+   - Nombre completo y nombre deportivo
+   - Apodo(s) dentro de la selección vs en su club
+   - Fecha y lugar de nacimiento, nacionalidad(es)
+   - Posición en la selección vs posición en su club (¿difieren?)
+   - Número habitual en la selección, si lo tiene fijo
+
+2. **🌍 CARRERA CON LA SELECCIÓN** ← PRIORIDAD #1
+   - Fecha y rival del DEBUT internacional + resultado del partido
+   - Caps totales (partidos jugados con la selección) actuales
+   - Goles internacionales: total, hitos (primer gol, gol número 50, etc.)
+   - Asistencias internacionales si aplica
+   - Torneos jugados con la selección:
+     * Copas del Mundo: ediciones, estadísticas, momentos clave
+     * Torneos continentales: títulos, goles decisivos
+     * Clasificatorias: rendimiento, goles importantes
+   - En el torneo / clasificatoria ACTUAL: rendimiento, goles, minutos
+
+3. **⚽ PERFIL EN CLUB (contexto, no biografía)**
+   - Club actual y país
+   - Rendimiento esta temporada (solo estadísticas clave)
+   - ¿Cómo llega a la selección? ¿Titular indiscutible o en disputa?
+
+4. **🎯 DATOS CURIOSOS — FACTOR WOW**
+   - Familia: ¿algún familiar que también vistió la misma selección? ¿padre o hermano internacional?
+   - Historia detrás de su debut: ¿cómo fue convocado por primera vez?
+   - Celebración de gol icónica with la selección y su significado
+   - Si alguna vez fue descartado/ignorado por la selección y cómo volvió
+   - Récords con la selección que tiene o está a punto de alcanzar
+   - Declaraciones memorables sobre la camiseta o el país
+   - Comparación con el ídolo histórico de su posición en esa selección
+
+5. **📊 ESTADO ACTUAL**
+   - ¿Lesionado? ¿En racha? ¿Recién recuperado?
+   - Situación en la selección: ¿capitán? ¿líder del vestuario? ¿joven promesa?
+   - Relación con el DT actual
+
+Resalta con 🎯 los datos más impactantes para narración en vivo.
+Responde en español. FECHA ACTUAL: {current_date}."""
+
+
+_NATIONAL_MATCH_PREP_PROMPT = """Eres el analista táctico y cronista de Fernando Palomo \
+para la transmisión de un partido entre selecciones nacionales. Tu misión: \
+preparación TOTAL del partido para que nada tome por sorpresa al narrador.
+
+PARTIDO: **{home_country}** vs **{away_country}**
+TORNEO / CONTEXTO: {tournament}
+TIPO DE PARTIDO: {match_type}
+FECHA ACTUAL: {current_date}
+
+Crea la FICHA COMPLETA del partido con los siguientes bloques:
+
+1. **⚔️ CONTEXTO DEL PARTIDO**
+   - Qué está en juego: puntos de clasificatoria, pase a siguiente fase, título, etc.
+   - Relevancia histórica de este partido en particular
+   - ¿Es una final anticipada? ¿Un derbi confederacional? ¿Revancha histórica?
+
+2. **📊 HISTORIAL DIRECTO (Head-to-Head)**
+   - Partidos totales jugados entre ambas selecciones
+   - Balance de victorias, empates, derrotas (por cada lado)
+   - Enfrentamientos RECIENTES (últimos 5 partidos): resultado, torneo, año, árbitro si memorable
+   - El partido más icónico de la historia entre ambas selecciones — detalla TODO
+   - El resultado más abultado en cada dirección
+   - ¿Alguna vez se enfrentaron en un Mundial? ¿En qué fase?
+
+3. **🏠 {home_country} — Análisis**
+   - Forma reciente: últimos 5 partidos con resultados, torneos y rivales
+   - Sistema táctico habitual del DT y posible alineación titular
+   - Jugadores clave en este partido (máximo 5): nombre + por qué importa HOY
+   - Jugadores ausentes: lesionados, sancionados, no convocados
+   - Fortalezas tácticas vs debilidades que puede explotar {away_country}
+
+4. **✈️ {away_country} — Análisis**
+   - Forma reciente: últimos 5 partidos
+   - Sistema táctico y posible alineación
+   - Jugadores clave (máximo 5)
+   - Bajas y ausencias
+   - Fortalezas vs debilidades que puede explotar {home_country}
+
+5. **🔮 CLAVES TÁCTICAS DEL PARTIDO**
+   - El duelo individual más importante a seguir
+   - ¿Quién controla el mediocampo controla el partido? Por qué
+   - Zonas del campo donde se decidirá el partido
+   - Árbitro asignado si conocido — historial con ambas selecciones
+
+6. **🎙️ FRASES PALOMO** — 3 frases en el estilo de Fernando Palomo listas para narrar:
+   - Una sobre la historia entre ambas selecciones
+   - Una sobre el jugador estrella de {home_country}
+   - Una sobre el jugador estrella de {away_country}
+
+Responde en español. Sé PRECISO y FASCINANTE. NO inventes datos."""
 
 
 _PALOMO_PHRASES_PROMPT = """Eres Fernando Palomo — EL narrador legendario de ESPN. \
@@ -2110,6 +2602,254 @@ def run_player_research(
 
 
 # ---------------------------------------------------------------------------
+# Selecciones Pipelines
+# ---------------------------------------------------------------------------
+
+def _research_national_player_solo(
+    player: Dict[str, Any],
+    country: str,
+    api_key: str,
+) -> Dict[str, Any]:
+    """Research a single national team player (convocado). Returns player dict."""
+    player_name = player.get("name", player.get("full_name", "Unknown"))
+    prompt = _NATIONAL_PLAYER_DOSSIER_PROMPT.format(
+        player_name=player_name,
+        country=country,
+        current_date=CURRENT_DATE,
+    )
+    text, sources = _gemini_request(
+        api_key=api_key,
+        system_prompt=prompt,
+        user_message=(
+            f"Dame el dossier internacional COMPLETO de {player_name} (selección de {country}). "
+            "Prioriza su carrera con la selección: caps, goles, debates, momentos clave."
+        ),
+    )
+    return {
+        "name": player_name,
+        "position": player.get("position", ""),
+        "number": player.get("number", ""),
+        "text": text,
+        "sources": sources,
+    }
+
+
+def _research_national_roster(
+    country: str,
+    api_key: str,
+    progress_cb: Optional[Callable[[str], None]] = None,
+) -> List[Dict[str, Any]]:
+    """Fetch and research the national team's current convocatoria player-by-player."""
+    if progress_cb:
+        progress_cb(f"📋 Obteniendo convocatoria de **{country}**...")
+    players = _fetch_player_list(country, api_key)
+    total = len(players)
+    if progress_cb:
+        progress_cb(f"✅ {total} convocados de **{country}**. Investigando uno por uno...")
+
+    results: List[Dict[str, Any]] = [None] * total  # type: ignore[list-item]
+    completed = 0
+    batch_size = 4
+    for batch_start in range(0, total, batch_size):
+        batch = players[batch_start: batch_start + batch_size]
+        with ThreadPoolExecutor(max_workers=batch_size) as executor:
+            future_to_idx = {
+                executor.submit(_research_national_player_solo, player, country, api_key): batch_start + i
+                for i, player in enumerate(batch)
+            }
+            for future in as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                try:
+                    results[idx] = future.result()
+                except Exception as e:
+                    p = players[idx]
+                    results[idx] = {
+                        "name": p.get("name", "?"),
+                        "position": p.get("position", ""),
+                        "number": p.get("number", ""),
+                        "text": f"❌ Error investigando: {e}",
+                        "sources": [],
+                    }
+                completed += 1
+                if progress_cb:
+                    pname = results[idx]["name"]
+                    progress_cb(f"🔍 [{completed}/{total}] **{pname}** ✓")
+
+    return results
+
+
+def run_national_team_research(
+    country: str,
+    confederation: str,
+    api_key: str,
+    progress_cb: Optional[Callable[[str], None]] = None,
+    partial_results: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Run national team research: history + convocatoria player-by-player."""
+    _cb = progress_cb or (lambda _msg: None)
+    results: Dict[str, Any] = partial_results or {
+        "team_history": ("", []),
+        "roster": [],
+    }
+
+    if not _has_data(results.get("team_history")):
+        _cb(f"📊 Investigando historial de **{country}**...")
+        conf_label = confederation if confederation and "(Cualquier" not in confederation else "Internacional"
+        prompt = _NATIONAL_TEAM_HISTORY_PROMPT.format(
+            country=country,
+            confederation=conf_label,
+            current_date=CURRENT_DATE,
+        )
+        try:
+            results["team_history"] = _gemini_request(
+                api_key=api_key,
+                system_prompt=prompt,
+                user_message=(
+                    f"Crea la ficha histórica COMPLETA de la selección de {country}. "
+                    "Incluye Mundiales, torneos continentales, clasificatorias actuales, "
+                    "récords y datos curiosos."
+                ),
+            )
+        except Exception as e:
+            results["team_history"] = (f"❌ Error: {e}", [])
+        _cb("✅ Historial completado.")
+    else:
+        _cb("✅ Historial ya disponible — reutilizando.")
+
+    if not _has_data(results.get("roster")):
+        _cb(f"👥 Investigando convocatoria de **{country}**...")
+        try:
+            results["roster"] = _research_national_roster(country, api_key, progress_cb=_cb)
+        except Exception as e:
+            results["roster"] = []
+            _cb(f"❌ Error con convocatoria de {country}: {e}")
+    elif _roster_has_failures(results.get("roster", [])):
+        results["roster"] = _retry_failed_roster_players(
+            results["roster"], country, "", api_key, progress_cb=_cb,
+        )
+    else:
+        _cb(f"✅ Convocatoria de **{country}** ya disponible — reutilizando.")
+
+    return results
+
+
+def run_national_match_prep(
+    home_country: str,
+    away_country: str,
+    tournament: str,
+    match_type: str,
+    api_key: str,
+    progress_cb: Optional[Callable[[str], None]] = None,
+    partial_results: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Run national team match preparation: analysis + head-to-head + both rosters."""
+    _cb = progress_cb or (lambda _msg: None)
+    results: Dict[str, Any] = partial_results or {
+        "home_history": ("", []),
+        "away_history": ("", []),
+        "home_roster": [],
+        "away_roster": [],
+        "palomo_phrases": ("", []),
+    }
+
+    match_prompt = _NATIONAL_MATCH_PREP_PROMPT.format(
+        home_country=home_country,
+        away_country=away_country,
+        tournament=tournament,
+        match_type=match_type,
+        current_date=CURRENT_DATE,
+    )
+
+    # Phase 1: combined match analysis (home + away + head-to-head in one call)
+    if not _has_data(results.get("home_history")):
+        _cb(f"📊 Analizando partido **{home_country} vs {away_country}**...")
+        try:
+            results["home_history"] = _gemini_request(
+                api_key=api_key,
+                system_prompt=match_prompt,
+                user_message=(
+                    f"Crea la preparación COMPLETA para {home_country} vs {away_country} "
+                    f"({match_type} — {tournament}). Incluye historial, análisis táctico de ambas "
+                    "selecciones, jugadores clave, bajas, claves tácticas y frases Palomo."
+                ),
+            )
+        except Exception as e:
+            results["home_history"] = (f"❌ Error en análisis: {e}", [])
+        _cb("✅ Análisis del partido completado.")
+    else:
+        _cb("✅ Análisis ya disponible — reutilizando.")
+
+    # Phase 2: home roster
+    if not _has_data(results.get("home_roster")):
+        _cb(f"👥 Investigando convocatoria de **{home_country}**...")
+        try:
+            results["home_roster"] = _research_national_roster(home_country, api_key, progress_cb=_cb)
+        except Exception as e:
+            results["home_roster"] = []
+            _cb(f"❌ Error con convocatoria de {home_country}: {e}")
+    elif _roster_has_failures(results.get("home_roster", [])):
+        results["home_roster"] = _retry_failed_roster_players(
+            results["home_roster"], home_country, away_country, api_key, progress_cb=_cb,
+        )
+    else:
+        _cb(f"✅ Convocatoria de **{home_country}** ya disponible — reutilizando.")
+
+    # Phase 3: away roster
+    if not _has_data(results.get("away_roster")):
+        _cb(f"👥 Investigando convocatoria de **{away_country}**...")
+        try:
+            results["away_roster"] = _research_national_roster(away_country, api_key, progress_cb=_cb)
+        except Exception as e:
+            results["away_roster"] = []
+            _cb(f"❌ Error con convocatoria de {away_country}: {e}")
+    elif _roster_has_failures(results.get("away_roster", [])):
+        results["away_roster"] = _retry_failed_roster_players(
+            results["away_roster"], away_country, home_country, api_key, progress_cb=_cb,
+        )
+    else:
+        _cb(f"✅ Convocatoria de **{away_country}** ya disponible — reutilizando.")
+
+    return results
+
+
+def run_national_player_research(
+    player_name: str,
+    country: str,
+    api_key: str,
+    progress_cb: Optional[Callable[[str], None]] = None,
+    partial_results: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Research a single national team player in depth."""
+    _cb = progress_cb or (lambda _msg: None)
+    results: Dict[str, Any] = partial_results or {"dossier": ("", [])}
+
+    if not _has_data(results.get("dossier")):
+        _cb(f"🔍 Investigando dossier de **{player_name}** (selección de {country})...")
+        prompt = _NATIONAL_PLAYER_DOSSIER_PROMPT.format(
+            player_name=player_name,
+            country=country,
+            current_date=CURRENT_DATE,
+        )
+        try:
+            results["dossier"] = _gemini_request(
+                api_key=api_key,
+                system_prompt=prompt,
+                user_message=(
+                    f"Dame el dossier internacional COMPLETO de {player_name}. "
+                    f"Selección de {country}. Prioriza su carrera con la selección, "
+                    "caps, goles internacionales, torneos, debut, récords, y factor WOW."
+                ),
+            )
+        except Exception as e:
+            results["dossier"] = (f"❌ Error investigando: {e}", [])
+        _cb("✅ Dossier completado.")
+    else:
+        _cb("✅ Dossier ya disponible — reutilizando.")
+
+    return results
+
+
+# ---------------------------------------------------------------------------
 # Custom CSS
 # ---------------------------------------------------------------------------
 _CUSTOM_CSS = """
@@ -2448,6 +3188,100 @@ def main() -> None:
                                 _delete_player_research(rid)
                                 st.rerun()
 
+            # --- Selecciones mode ---
+            elif app_mode == MODE_SELECCIONES:
+                sel_tab = st.session_state.get("sel_active_tab", SEL_TAB_SELECCION)
+
+                if sel_tab == SEL_TAB_SELECCION:
+                    if st.session_state.get("nat_team_research_results"):
+                        if st.button("➕ Nueva selección", use_container_width=True):
+                            st.session_state.pop("nat_team_research_results", None)
+                            st.session_state.pop("nat_team_research_config", None)
+                            st.session_state.pop("nat_team_research_id", None)
+                            st.rerun()
+
+                    nt_researches = _list_national_team_researches()
+                    if nt_researches:
+                        st.markdown("##### 🌍 Selecciones")
+                        for res in nt_researches:
+                            rid = res["id"]
+                            title = res.get("title", "Sin título")
+                            conf = res.get("confederation", "")
+                            label = f"{title} (▪ {conf.split('—')[0].strip()})" if conf and "Cualquier" not in conf else title
+                            col_t, col_d = st.columns([5, 1])
+                            with col_t:
+                                if st.button(label, key=f"ntr_{rid}", use_container_width=True):
+                                    loaded = _load_national_team_research(rid)
+                                    if loaded:
+                                        st.session_state.nat_team_research_config = loaded["config"]
+                                        st.session_state.nat_team_research_results = loaded["results"]
+                                        st.session_state.nat_team_research_id = rid
+                                    st.rerun()
+                            with col_d:
+                                if st.button("🗑️", key=f"dntr_{rid}"):
+                                    _delete_national_team_research(rid)
+                                    st.rerun()
+
+                elif sel_tab == SEL_TAB_PARTIDO:
+                    if st.session_state.get("nat_match_results"):
+                        if st.button("➕ Nuevo partido", use_container_width=True):
+                            st.session_state.pop("nat_match_results", None)
+                            st.session_state.pop("nat_match_config", None)
+                            st.session_state.pop("nat_match_prep_id", None)
+                            st.rerun()
+
+                    nm_preps = _list_national_match_preps()
+                    if nm_preps:
+                        st.markdown("##### ⚽ Partidos")
+                        for res in nm_preps:
+                            pid = res["id"]
+                            title = res.get("title", "Sin título")
+                            tour = res.get("tournament", "")
+                            label = f"{title} | {tour}" if tour else title
+                            col_t, col_d = st.columns([5, 1])
+                            with col_t:
+                                if st.button(label, key=f"nmatch_{pid}", use_container_width=True):
+                                    loaded = _load_national_match_prep(pid)
+                                    if loaded:
+                                        st.session_state.nat_match_config = loaded["config"]
+                                        st.session_state.nat_match_results = loaded["results"]
+                                        st.session_state.nat_match_prep_id = pid
+                                    st.rerun()
+                            with col_d:
+                                if st.button("🗑️", key=f"dnmatch_{pid}"):
+                                    _delete_national_match_prep(pid)
+                                    st.rerun()
+
+                elif sel_tab == SEL_TAB_CONVOCADO:
+                    if st.session_state.get("nat_player_results"):
+                        if st.button("➕ Nuevo convocado", use_container_width=True):
+                            st.session_state.pop("nat_player_results", None)
+                            st.session_state.pop("nat_player_config", None)
+                            st.session_state.pop("nat_player_research_id", None)
+                            st.rerun()
+
+                    np_researches = _list_national_player_researches()
+                    if np_researches:
+                        st.markdown("##### 🧑 Convocados")
+                        for res in np_researches:
+                            rid = res["id"]
+                            title = res.get("title", "Sin título")
+                            country = res.get("country", "")
+                            label = f"{title} ({country})" if country else title
+                            col_t, col_d = st.columns([5, 1])
+                            with col_t:
+                                if st.button(label, key=f"npr_{rid}", use_container_width=True):
+                                    loaded = _load_national_player_research(rid)
+                                    if loaded:
+                                        st.session_state.nat_player_config = loaded["config"]
+                                        st.session_state.nat_player_results = loaded["results"]
+                                        st.session_state.nat_player_research_id = rid
+                                    st.rerun()
+                            with col_d:
+                                if st.button("🗑️", key=f"dnpr_{rid}"):
+                                    _delete_national_player_research(rid)
+                                    st.rerun()
+
         st.markdown("---")
         st.caption("🌐 Datos en tiempo real · Cualquier liga · Verificado con fuentes")
 
@@ -2465,6 +3299,8 @@ def main() -> None:
         _render_match_research(api_key)
     elif app_mode == MODE_PLAYER_RESEARCH:
         _render_player_research(api_key)
+    elif app_mode == MODE_SELECCIONES:
+        _render_selecciones(api_key)
     else:
         _render_match_prep(api_key)
 
@@ -3181,15 +4017,6 @@ def _render_player_research(api_key: str) -> None:
             key="pr_team_name",
         )
 
-    col3, _ = st.columns([1, 2])
-    with col3:
-        position = st.selectbox(
-            "📌 Posición",
-            options=_PLAYER_POSITION_OPTIONS,
-            format_func=lambda p: _POS_LABELS.get(p, p),
-            key="pr_position",
-        )
-
     can_submit = bool(player_name and team_name)
 
     if st.button(
@@ -3205,7 +4032,6 @@ def _render_player_research(api_key: str) -> None:
         st.session_state.player_research_config = {
             "player_name": player_name,
             "team_name": team_name,
-            "position": position,
         }
         _run_player_research_pipeline(st.session_state.player_research_config, api_key)
 
@@ -3276,6 +4102,391 @@ def _display_player_research_results(config: dict, results: dict) -> None:
 
     # ---- Dossier (full width) ----
     st.markdown("### 📋 Dossier Completo")
+    dossier_text, dossier_srcs = results.get("dossier", ("", []))
+    st.markdown(dossier_text)
+    if dossier_srcs:
+        with st.expander("📚 Fuentes"):
+            st.markdown(_format_sources(dossier_srcs).replace(_CITATION_SEPARATOR, ""))
+
+
+# ---------------------------------------------------------------------------
+# Selecciones mega mode
+# ---------------------------------------------------------------------------
+
+def _render_selecciones(api_key: str) -> None:
+    """Top-level Selecciones render — three tabs for national team research."""
+    st.markdown(
+        '<p class="hero-title">🌍 Selecciones Nacionales</p>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<p class="hero-sub">'
+        'Investigación profunda de selecciones, partidos y convocados — '
+        'el mismo nivel de análisis adaptado al fútbol internacional'
+        '</p>',
+        unsafe_allow_html=True,
+    )
+
+    tab_labels = [
+        "🔬 Investigar Selección",
+        "⚽ Partido de Selecciones",
+        "🧑 Investigar Convocado",
+    ]
+    tabs = st.tabs(tab_labels)
+
+    with tabs[SEL_TAB_SELECCION]:
+        st.session_state.sel_active_tab = SEL_TAB_SELECCION
+        _render_sel_team_tab(api_key)
+
+    with tabs[SEL_TAB_PARTIDO]:
+        st.session_state.sel_active_tab = SEL_TAB_PARTIDO
+        _render_sel_match_tab(api_key)
+
+    with tabs[SEL_TAB_CONVOCADO]:
+        st.session_state.sel_active_tab = SEL_TAB_CONVOCADO
+        _render_sel_player_tab(api_key)
+
+
+# ---- Tab 0: Investigar Selección ----------------------------------------
+
+def _render_sel_team_tab(api_key: str) -> None:
+    if st.session_state.get("nat_team_research_results") and st.session_state.get("nat_team_research_config"):
+        existing = st.session_state.nat_team_research_results
+        config = st.session_state.nat_team_research_config
+
+        missing = not _has_data(existing.get("team_history"))
+        has_failures = _roster_has_failures(existing.get("roster", []))
+        if missing or has_failures:
+            n_failed = sum(
+                1 for r in existing.get("roster", [])
+                if isinstance(r, dict) and str(r.get("text", "")).startswith("❌")
+            )
+            parts = []
+            if missing:
+                parts.append("falta historial")
+            if n_failed:
+                parts.append(f"{n_failed} jugadores con error")
+            st.warning(f"⚠️ Análisis incompleto — {', '.join(parts)}. Puedes continuar desde aquí.")
+            if st.button("🔄 Continuar análisis", type="primary", use_container_width=True, key="sel_continue_team"):
+                _run_sel_team_pipeline(config, api_key, partial_results=existing)
+                return
+
+        _display_sel_team_results(config, existing)
+        return
+
+    # --- Form ---
+    st.markdown("### 📋 Selección a investigar")
+    col1, col2 = st.columns(2)
+    with col1:
+        country = st.text_input(
+            "🌍 País / Selección",
+            placeholder="Ej: Argentina, España, Brasil...",
+            key="sel_country",
+        )
+    with col2:
+        confederation = st.selectbox(
+            "🏛️ Confederación (opcional)",
+            options=CONFEDERATION_OPTIONS,
+            key="sel_confederation",
+        )
+
+    can_submit = bool(country)
+    if st.button("🔬 Investigar Selección", use_container_width=True, disabled=not can_submit,
+                 type="primary", key="sel_team_submit"):
+        if not api_key:
+            st.error("⚠️ No se encontró la API key de Gemini.")
+            return
+        st.session_state.nat_team_research_config = {
+            "country": country,
+            "confederation": confederation,
+        }
+        st.session_state.sel_active_tab = SEL_TAB_SELECCION
+        _run_sel_team_pipeline(st.session_state.nat_team_research_config, api_key)
+
+
+def _run_sel_team_pipeline(config: dict, api_key: str, partial_results: Optional[Dict[str, Any]] = None) -> None:
+    label = "🔄 Continuando..." if partial_results else "🔍 Investigando selección..."
+    with st.status(label, expanded=True) as status:
+        def _progress(msg: str) -> None:
+            status.write(msg)
+        try:
+            results = run_national_team_research(
+                country=config["country"],
+                confederation=config.get("confederation", ""),
+                api_key=api_key,
+                progress_cb=_progress,
+                partial_results=partial_results,
+            )
+            st.session_state.nat_team_research_results = results
+            status.update(label="✅ ¡Investigación completa!", state="complete", expanded=False)
+            try:
+                _save_national_team_research(config, results)
+            except Exception as e:
+                print(f"[Sel] Error saving national team: {e}")
+        except Exception as e:
+            if partial_results:
+                st.session_state.nat_team_research_results = partial_results
+                try:
+                    _save_national_team_research(config, partial_results)
+                except Exception:
+                    pass
+            status.update(label=f"❌ Error: {e}", state="error")
+            print(f"[Sel] Error nat team:\n{traceback.format_exc()}")
+    st.rerun()
+
+
+def _display_sel_team_results(config: dict, results: dict) -> None:
+    country = config["country"]
+    confederation = config.get("confederation", "")
+    meta = confederation if confederation and "(Cualquier" not in confederation else "Selección Nacional"
+
+    st.markdown("---")
+    st.markdown(
+        f'<div class="match-header"><h2>🌍 {country}</h2>'
+        f'<div class="match-meta">{meta}</div></div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown("### 📊 Historial de la Selección")
+    h_text, h_srcs = results.get("team_history", ("", []))
+    st.markdown(h_text)
+    if h_srcs:
+        with st.expander("📚 Fuentes"):
+            st.markdown(_format_sources(h_srcs).replace(_CITATION_SEPARATOR, ""))
+
+    roster = results.get("roster", [])
+    if roster:
+        st.markdown("---")
+        st.markdown("### 🎽 Convocatoria — Dossier por Jugador")
+        _render_roster_players(roster)
+
+
+# ---- Tab 1: Partido de Selecciones --------------------------------------
+
+def _render_sel_match_tab(api_key: str) -> None:
+    if st.session_state.get("nat_match_results") and st.session_state.get("nat_match_config"):
+        existing = st.session_state.nat_match_results
+        config = st.session_state.nat_match_config
+
+        home_ok = _has_data(existing.get("home_history"))
+        home_roster_ok = _has_data(existing.get("home_roster")) and not _roster_has_failures(existing.get("home_roster", []))
+        away_roster_ok = _has_data(existing.get("away_roster")) and not _roster_has_failures(existing.get("away_roster", []))
+        is_incomplete = not (home_ok and home_roster_ok and away_roster_ok)
+
+        if is_incomplete:
+            st.warning("⚠️ Preparación incompleta. Puedes continuar sin perder el trabajo previo.")
+            if st.button("🔄 Continuar preparación", type="primary", use_container_width=True, key="sel_continue_match"):
+                _run_sel_match_pipeline(config, api_key, partial_results=existing)
+                return
+
+        _display_sel_match_results(config, existing)
+        return
+
+    # --- Form ---
+    st.markdown("### 📋 Partido a preparar")
+    col1, col2 = st.columns(2)
+    with col1:
+        home_country = st.text_input(
+            "🏠 País Local",
+            placeholder="Ej: Argentina",
+            key="sel_home_country",
+        )
+    with col2:
+        away_country = st.text_input(
+            "✈️ País Visitante",
+            placeholder="Ej: Brasil",
+            key="sel_away_country",
+        )
+
+    col3, col4 = st.columns(2)
+    with col3:
+        tournament = st.selectbox(
+            "🏆 Torneo / Contexto",
+            options=NATIONAL_TOURNAMENT_OPTIONS,
+            key="sel_match_tournament",
+        )
+    with col4:
+        match_type = st.selectbox(
+            "🎯 Tipo de Partido",
+            options=MATCH_TYPE_OPTIONS,
+            key="sel_match_type",
+        )
+
+    can_submit = bool(home_country and away_country)
+    if st.button("⚽ Preparar Partido", use_container_width=True, disabled=not can_submit,
+                 type="primary", key="sel_match_submit"):
+        if not api_key:
+            st.error("⚠️ No se encontró la API key de Gemini.")
+            return
+        st.session_state.nat_match_config = {
+            "home_country": home_country,
+            "away_country": away_country,
+            "tournament": tournament,
+            "match_type": match_type,
+        }
+        st.session_state.sel_active_tab = SEL_TAB_PARTIDO
+        _run_sel_match_pipeline(st.session_state.nat_match_config, api_key)
+
+
+def _run_sel_match_pipeline(config: dict, api_key: str, partial_results: Optional[Dict[str, Any]] = None) -> None:
+    label = "🔄 Continuando..." if partial_results else "🔍 Preparando partido..."
+    with st.status(label, expanded=True) as status:
+        def _progress(msg: str) -> None:
+            status.write(msg)
+        try:
+            results = run_national_match_prep(
+                home_country=config["home_country"],
+                away_country=config["away_country"],
+                tournament=config.get("tournament", ""),
+                match_type=config.get("match_type", ""),
+                api_key=api_key,
+                progress_cb=_progress,
+                partial_results=partial_results,
+            )
+            st.session_state.nat_match_results = results
+            status.update(label="✅ ¡Partido preparado!", state="complete", expanded=False)
+            try:
+                _save_national_match_prep(config, results)
+            except Exception as e:
+                print(f"[Sel] Error saving nat match: {e}")
+        except Exception as e:
+            if partial_results:
+                st.session_state.nat_match_results = partial_results
+                try:
+                    _save_national_match_prep(config, partial_results)
+                except Exception:
+                    pass
+            status.update(label=f"❌ Error: {e}", state="error")
+            print(f"[Sel] Error nat match:\n{traceback.format_exc()}")
+    st.rerun()
+
+
+def _display_sel_match_results(config: dict, results: dict) -> None:
+    home = config["home_country"]
+    away = config["away_country"]
+    tournament = config.get("tournament", "")
+    match_type = config.get("match_type", "")
+
+    st.markdown("---")
+    meta_parts = [p for p in [tournament, match_type] if p]
+    meta = " · ".join(meta_parts) if meta_parts else "Partido Internacional"
+    st.markdown(
+        f'<div class="match-header"><h2>⚽ {home} vs {away}</h2>'
+        f'<div class="match-meta">{meta}</div></div>',
+        unsafe_allow_html=True,
+    )
+
+    # Main analysis
+    st.markdown("### 📊 Análisis del Partido")
+    h_text, h_srcs = results.get("home_history", ("", []))
+    st.markdown(h_text)
+    if h_srcs:
+        with st.expander("📚 Fuentes"):
+            st.markdown(_format_sources(h_srcs).replace(_CITATION_SEPARATOR, ""))
+
+    # Home roster
+    home_roster = results.get("home_roster", [])
+    if home_roster:
+        st.markdown("---")
+        st.markdown(f"### 🏠 Convocatoria de **{home}**")
+        _render_roster_players(home_roster)
+
+    # Away roster
+    away_roster = results.get("away_roster", [])
+    if away_roster:
+        st.markdown("---")
+        st.markdown(f"### ✈️ Convocatoria de **{away}**")
+        _render_roster_players(away_roster)
+
+
+# ---- Tab 2: Investigar Convocado ----------------------------------------
+
+def _render_sel_player_tab(api_key: str) -> None:
+    if st.session_state.get("nat_player_results") and st.session_state.get("nat_player_config"):
+        existing = st.session_state.nat_player_results
+        config = st.session_state.nat_player_config
+
+        if not _has_data(existing.get("dossier")):
+            st.warning("⚠️ Dossier incompleto. Puedes continuar la investigación.")
+            if st.button("🔄 Continuar investigación", type="primary", use_container_width=True, key="sel_continue_player"):
+                _run_sel_player_pipeline(config, api_key, partial_results=existing)
+                return
+
+        _display_sel_player_results(config, existing)
+        return
+
+    # --- Form ---
+    st.markdown("### 📋 Convocado a investigar")
+    col1, col2 = st.columns(2)
+    with col1:
+        player_name = st.text_input(
+            "🧑 Nombre del Jugador",
+            placeholder="Ej: Lionel Messi",
+            key="sel_player_name",
+        )
+    with col2:
+        country = st.text_input(
+            "🌍 Selección",
+            placeholder="Ej: Argentina",
+            key="sel_player_country",
+        )
+
+    can_submit = bool(player_name and country)
+    if st.button("🧑 Investigar Convocado", use_container_width=True, disabled=not can_submit,
+                 type="primary", key="sel_player_submit"):
+        if not api_key:
+            st.error("⚠️ No se encontró la API key de Gemini.")
+            return
+        st.session_state.nat_player_config = {
+            "player_name": player_name,
+            "country": country,
+        }
+        st.session_state.sel_active_tab = SEL_TAB_CONVOCADO
+        _run_sel_player_pipeline(st.session_state.nat_player_config, api_key)
+
+
+def _run_sel_player_pipeline(config: dict, api_key: str, partial_results: Optional[Dict[str, Any]] = None) -> None:
+    label = "🔄 Continuando..." if partial_results else "🔍 Investigando convocado..."
+    with st.status(label, expanded=True) as status:
+        def _progress(msg: str) -> None:
+            status.write(msg)
+        try:
+            results = run_national_player_research(
+                player_name=config["player_name"],
+                country=config["country"],
+                api_key=api_key,
+                progress_cb=_progress,
+                partial_results=partial_results,
+            )
+            st.session_state.nat_player_results = results
+            status.update(label="✅ ¡Dossier completo!", state="complete", expanded=False)
+            try:
+                _save_national_player_research(config, results)
+            except Exception as e:
+                print(f"[Sel] Error saving nat player: {e}")
+        except Exception as e:
+            if partial_results:
+                st.session_state.nat_player_results = partial_results
+                try:
+                    _save_national_player_research(config, partial_results)
+                except Exception:
+                    pass
+            status.update(label=f"❌ Error: {e}", state="error")
+            print(f"[Sel] Error nat player:\n{traceback.format_exc()}")
+    st.rerun()
+
+
+def _display_sel_player_results(config: dict, results: dict) -> None:
+    player = config["player_name"]
+    country = config.get("country", "")
+
+    st.markdown("---")
+    meta = f"Selección de {country}" if country else "Selección Nacional"
+    st.markdown(
+        f'<div class="match-header"><h2>🧑 {player}</h2>'
+        f'<div class="match-meta">{meta}</div></div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown("### 📋 Dossier Internacional")
     dossier_text, dossier_srcs = results.get("dossier", ("", []))
     st.markdown(dossier_text)
     if dossier_srcs:
