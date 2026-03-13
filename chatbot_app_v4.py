@@ -34,18 +34,20 @@ GEMINI_FALLBACK_MODEL = "gemini-2.5-pro"
 CLAUDE_MODEL = "claude-opus-4-6"
 CLAUDE_HAIKU_MODEL = "claude-haiku-4-5"
 
-MODE_PALOMO_GPT      = "palomo_gpt"
-MODE_MATCH_PREP      = "match_prep"
-MODE_MATCH_RESEARCH  = "match_research"
-MODE_PLAYER_RESEARCH = "player_research"
-MODE_SELECCIONES     = "selecciones"
+MODE_PALOMO_GPT  = "palomo_gpt"
+MODE_CLUB        = "club"
+MODE_SELECCION   = "seleccion"
+
+# Aliases so existing sidebar/routing references keep working
+MODE_MATCH_PREP      = MODE_CLUB
+MODE_MATCH_RESEARCH  = MODE_CLUB
+MODE_PLAYER_RESEARCH = MODE_CLUB
+MODE_SELECCIONES     = MODE_SELECCION
 
 MODE_OPTIONS = {
-    MODE_PALOMO_GPT:      "🎙️ PalomoGPT",
-    MODE_MATCH_PREP:      "⚽ Investigar Partido",
-    MODE_MATCH_RESEARCH:  "🔬 Investigar Equipo",
-    MODE_PLAYER_RESEARCH: "🧑 Investigar Jugador",
-    MODE_SELECCIONES:     "🌍 Selecciones",
+    MODE_PALOMO_GPT: "🎙️ PalomoGPT",
+    MODE_CLUB:       "🏠 Investigar Club",
+    MODE_SELECCION:  "🌍 Investigar Selección",
 }
 
 CURRENT_YEAR = datetime.now().year
@@ -125,10 +127,19 @@ NATIONAL_TOURNAMENT_OPTIONS = [
     "Sub-17 (FIFA World Cup)",
 ]
 
-# Sub-mode indices for MODE_SELECCIONES tabs
-SEL_TAB_SELECCION = 0
-SEL_TAB_PARTIDO   = 1
-SEL_TAB_CONVOCADO = 2
+# Shared tab indices — identical for both Club and Selección
+TAB_PARTIDO  = 0   # ⚽ Partido
+TAB_EQUIPO   = 1   # 🔬 Equipo / Selección
+TAB_JUGADOR  = 2   # 🧑 Jugador / Convocado
+
+# Aliases for existing Seleccion render functions
+SEL_TAB_SELECCION = TAB_EQUIPO
+SEL_TAB_PARTIDO   = TAB_PARTIDO
+SEL_TAB_CONVOCADO = TAB_JUGADOR
+
+# Club tab session-state key
+CLUB_ACTIVE_TAB_KEY = "club_active_tab"
+SEL_ACTIVE_TAB_KEY  = "sel_active_tab"
 # Supabase persistence helpers
 # ---------------------------------------------------------------------------
 
@@ -3093,143 +3104,114 @@ def main() -> None:
                                 st.session_state.messages = []
                             st.rerun()
         else:
-            # --- Match Prep mode ---
-            if app_mode == MODE_MATCH_PREP:
-                if st.session_state.get("match_results"):
-                    if st.button("➕ Nueva preparación", use_container_width=True):
-                        st.session_state.pop("match_results", None)
-                        st.session_state.pop("match_config", None)
-                        st.session_state.pop("match_pdf_bytes", None)
-                        st.rerun()
+            # ================================================================
+            # MODE_CLUB sidebar — context per active club tab
+            # ================================================================
+            if app_mode == MODE_CLUB:
+                club_tab = st.session_state.get("club_active_tab", TAB_PARTIDO)
 
-                preps = _list_match_preps()
-                if preps:
-                    st.markdown("##### ⚽ Partidos")
-                    for prep in preps:
-                        pid = prep["id"]
-                        title = prep.get("title", "Sin título")
-
-                        col_title, col_del = st.columns([5, 1])
-                        with col_title:
-                            if st.button(title, key=f"prep_{pid}", use_container_width=True):
-                                loaded = _load_match_prep(pid)
-                                if loaded:
-                                    st.session_state.match_config = loaded["config"]
-                                    st.session_state.match_results = loaded["results"]
-                                    st.session_state.match_prep_id = pid
-                                    st.session_state.pop("match_pdf_bytes", None)
-                                st.rerun()
-                        with col_del:
-                            if st.button("🗑️", key=f"dprep_{pid}"):
-                                _delete_match_prep(pid)
-                                st.rerun()
-
-            # --- Team Research mode ---
-            elif app_mode == MODE_MATCH_RESEARCH:
-                if st.session_state.get("team_research_results"):
-                    if st.button("➕ Nueva investigación", use_container_width=True):
-                        st.session_state.pop("team_research_results", None)
-                        st.session_state.pop("team_research_config", None)
-                        st.session_state.pop("team_research_id", None)
-                        st.rerun()
-
-                researches = _list_team_researches()
-                if researches:
-                    st.markdown("##### 🔬 Equipos")
-                    for res in researches:
-                        rid = res["id"]
-                        title = res.get("title", "Sin título")
-                        league = res.get("tournament", "")
-                        label = f"{title} ({league})" if league else title
-
-                        col_title, col_del = st.columns([5, 1])
-                        with col_title:
-                            if st.button(label, key=f"tres_{rid}", use_container_width=True):
-                                loaded = _load_team_research(rid)
-                                if loaded:
-                                    st.session_state.team_research_config = loaded["config"]
-                                    st.session_state.team_research_results = loaded["results"]
-                                    st.session_state.team_research_id = rid
-                                st.rerun()
-                        with col_del:
-                            if st.button("🗑️", key=f"dtres_{rid}"):
-                                _delete_team_research(rid)
-                                st.rerun()
-
-            # --- Player Research mode ---
-            elif app_mode == MODE_PLAYER_RESEARCH:
-                if st.session_state.get("player_research_results"):
-                    if st.button("➕ Nueva investigación", use_container_width=True):
-                        st.session_state.pop("player_research_results", None)
-                        st.session_state.pop("player_research_config", None)
-                        st.session_state.pop("player_research_id", None)
-                        st.rerun()
-
-                presearches = _list_player_researches()
-                if presearches:
-                    st.markdown("##### 🧑 Jugadores")
-                    for res in presearches:
-                        rid = res["id"]
-                        title = res.get("title", "Sin título")
-                        team = res.get("team_name", "")
-                        label = f"{title} ({team})" if team else title
-
-                        col_title, col_del = st.columns([5, 1])
-                        with col_title:
-                            if st.button(label, key=f"pres_{rid}", use_container_width=True):
-                                loaded = _load_player_research(rid)
-                                if loaded:
-                                    st.session_state.player_research_config = loaded["config"]
-                                    st.session_state.player_research_results = loaded["results"]
-                                    st.session_state.player_research_id = rid
-                                st.rerun()
-                        with col_del:
-                            if st.button("🗑️", key=f"dpres_{rid}"):
-                                _delete_player_research(rid)
-                                st.rerun()
-
-            # --- Selecciones mode ---
-            elif app_mode == MODE_SELECCIONES:
-                sel_tab = st.session_state.get("sel_active_tab", SEL_TAB_SELECCION)
-
-                if sel_tab == SEL_TAB_SELECCION:
-                    if st.session_state.get("nat_team_research_results"):
-                        if st.button("➕ Nueva selección", use_container_width=True):
-                            st.session_state.pop("nat_team_research_results", None)
-                            st.session_state.pop("nat_team_research_config", None)
-                            st.session_state.pop("nat_team_research_id", None)
+                if club_tab == TAB_PARTIDO:
+                    # ⚽ Partido history
+                    if st.session_state.get("match_results"):
+                        if st.button("➕ Nuevo partido", use_container_width=True):
+                            st.session_state.pop("match_results", None)
+                            st.session_state.pop("match_config", None)
+                            st.session_state.pop("match_pdf_bytes", None)
                             st.rerun()
-
-                    nt_researches = _list_national_team_researches()
-                    if nt_researches:
-                        st.markdown("##### 🌍 Selecciones")
-                        for res in nt_researches:
-                            rid = res["id"]
-                            title = res.get("title", "Sin título")
-                            conf = res.get("confederation", "")
-                            label = f"{title} (▪ {conf.split('—')[0].strip()})" if conf and "Cualquier" not in conf else title
+                    preps = _list_match_preps()
+                    if preps:
+                        st.markdown("##### ⚽ Partidos")
+                        for prep in preps:
+                            pid = prep["id"]
+                            title = prep.get("title", "Sin título")
                             col_t, col_d = st.columns([5, 1])
                             with col_t:
-                                if st.button(label, key=f"ntr_{rid}", use_container_width=True):
-                                    loaded = _load_national_team_research(rid)
+                                if st.button(title, key=f"prep_{pid}", use_container_width=True):
+                                    loaded = _load_match_prep(pid)
                                     if loaded:
-                                        st.session_state.nat_team_research_config = loaded["config"]
-                                        st.session_state.nat_team_research_results = loaded["results"]
-                                        st.session_state.nat_team_research_id = rid
+                                        st.session_state.match_config = loaded["config"]
+                                        st.session_state.match_results = loaded["results"]
+                                        st.session_state.match_prep_id = pid
+                                        st.session_state.pop("match_pdf_bytes", None)
                                     st.rerun()
                             with col_d:
-                                if st.button("🗑️", key=f"dntr_{rid}"):
-                                    _delete_national_team_research(rid)
+                                if st.button("🗑️", key=f"dprep_{pid}"):
+                                    _delete_match_prep(pid)
                                     st.rerun()
 
-                elif sel_tab == SEL_TAB_PARTIDO:
+                elif club_tab == TAB_EQUIPO:
+                    # 🔬 Equipo history
+                    if st.session_state.get("team_research_results"):
+                        if st.button("➕ Nuevo equipo", use_container_width=True):
+                            st.session_state.pop("team_research_results", None)
+                            st.session_state.pop("team_research_config", None)
+                            st.session_state.pop("team_research_id", None)
+                            st.rerun()
+                    researches = _list_team_researches()
+                    if researches:
+                        st.markdown("##### 🔬 Equipos")
+                        for res in researches:
+                            rid = res["id"]
+                            title = res.get("title", "Sin título")
+                            league = res.get("tournament", "")
+                            label = f"{title} ({league})" if league else title
+                            col_t, col_d = st.columns([5, 1])
+                            with col_t:
+                                if st.button(label, key=f"tres_{rid}", use_container_width=True):
+                                    loaded = _load_team_research(rid)
+                                    if loaded:
+                                        st.session_state.team_research_config = loaded["config"]
+                                        st.session_state.team_research_results = loaded["results"]
+                                        st.session_state.team_research_id = rid
+                                    st.rerun()
+                            with col_d:
+                                if st.button("🗑️", key=f"dtres_{rid}"):
+                                    _delete_team_research(rid)
+                                    st.rerun()
+
+                elif club_tab == TAB_JUGADOR:
+                    # 🧑 Jugador history
+                    if st.session_state.get("player_research_results"):
+                        if st.button("➕ Nuevo jugador", use_container_width=True):
+                            st.session_state.pop("player_research_results", None)
+                            st.session_state.pop("player_research_config", None)
+                            st.session_state.pop("player_research_id", None)
+                            st.rerun()
+                    presearches = _list_player_researches()
+                    if presearches:
+                        st.markdown("##### 🧑 Jugadores")
+                        for res in presearches:
+                            rid = res["id"]
+                            title = res.get("title", "Sin título")
+                            team = res.get("team_name", "")
+                            label = f"{title} ({team})" if team else title
+                            col_t, col_d = st.columns([5, 1])
+                            with col_t:
+                                if st.button(label, key=f"pres_{rid}", use_container_width=True):
+                                    loaded = _load_player_research(rid)
+                                    if loaded:
+                                        st.session_state.player_research_config = loaded["config"]
+                                        st.session_state.player_research_results = loaded["results"]
+                                        st.session_state.player_research_id = rid
+                                    st.rerun()
+                            with col_d:
+                                if st.button("🗑️", key=f"dpres_{rid}"):
+                                    _delete_player_research(rid)
+                                    st.rerun()
+
+            # ================================================================
+            # MODE_SELECCION sidebar — context per active seleccion tab
+            # ================================================================
+            elif app_mode == MODE_SELECCION:
+                sel_tab = st.session_state.get("sel_active_tab", TAB_PARTIDO)
+
+                if sel_tab == TAB_PARTIDO:
                     if st.session_state.get("nat_match_results"):
                         if st.button("➕ Nuevo partido", use_container_width=True):
                             st.session_state.pop("nat_match_results", None)
                             st.session_state.pop("nat_match_config", None)
                             st.session_state.pop("nat_match_prep_id", None)
                             st.rerun()
-
                     nm_preps = _list_national_match_preps()
                     if nm_preps:
                         st.markdown("##### ⚽ Partidos")
@@ -3252,14 +3234,42 @@ def main() -> None:
                                     _delete_national_match_prep(pid)
                                     st.rerun()
 
-                elif sel_tab == SEL_TAB_CONVOCADO:
+                elif sel_tab == TAB_EQUIPO:
+                    if st.session_state.get("nat_team_research_results"):
+                        if st.button("➕ Nueva selección", use_container_width=True):
+                            st.session_state.pop("nat_team_research_results", None)
+                            st.session_state.pop("nat_team_research_config", None)
+                            st.session_state.pop("nat_team_research_id", None)
+                            st.rerun()
+                    nt_researches = _list_national_team_researches()
+                    if nt_researches:
+                        st.markdown("##### 🌍 Selecciones")
+                        for res in nt_researches:
+                            rid = res["id"]
+                            title = res.get("title", "Sin título")
+                            conf = res.get("confederation", "")
+                            label = f"{title} ({conf.split('—')[0].strip()})" if conf and "Cualquier" not in conf else title
+                            col_t, col_d = st.columns([5, 1])
+                            with col_t:
+                                if st.button(label, key=f"ntr_{rid}", use_container_width=True):
+                                    loaded = _load_national_team_research(rid)
+                                    if loaded:
+                                        st.session_state.nat_team_research_config = loaded["config"]
+                                        st.session_state.nat_team_research_results = loaded["results"]
+                                        st.session_state.nat_team_research_id = rid
+                                    st.rerun()
+                            with col_d:
+                                if st.button("🗑️", key=f"dntr_{rid}"):
+                                    _delete_national_team_research(rid)
+                                    st.rerun()
+
+                elif sel_tab == TAB_JUGADOR:
                     if st.session_state.get("nat_player_results"):
                         if st.button("➕ Nuevo convocado", use_container_width=True):
                             st.session_state.pop("nat_player_results", None)
                             st.session_state.pop("nat_player_config", None)
                             st.session_state.pop("nat_player_research_id", None)
                             st.rerun()
-
                     np_researches = _list_national_player_researches()
                     if np_researches:
                         st.markdown("##### 🧑 Convocados")
@@ -3281,7 +3291,6 @@ def main() -> None:
                                 if st.button("🗑️", key=f"dnpr_{rid}"):
                                     _delete_national_player_research(rid)
                                     st.rerun()
-
         st.markdown("---")
         st.caption("🌐 Datos en tiempo real · Cualquier liga · Verificado con fuentes")
 
@@ -3293,16 +3302,12 @@ def main() -> None:
     # ---- Route to active mode ----
     if app_mode == MODE_PALOMO_GPT:
         _render_palomo_gpt(api_key, incoming_query)
-    elif app_mode == MODE_MATCH_PREP:
-        _render_match_prep(api_key)
-    elif app_mode == MODE_MATCH_RESEARCH:
-        _render_match_research(api_key)
-    elif app_mode == MODE_PLAYER_RESEARCH:
-        _render_player_research(api_key)
-    elif app_mode == MODE_SELECCIONES:
-        _render_selecciones(api_key)
+    elif app_mode == MODE_CLUB:
+        _render_club(api_key)
+    elif app_mode == MODE_SELECCION:
+        _render_seleccion(api_key)
     else:
-        _render_match_prep(api_key)
+        _render_club(api_key)
 
 
 # ---------------------------------------------------------------------------
@@ -4492,6 +4497,68 @@ def _display_sel_player_results(config: dict, results: dict) -> None:
     if dossier_srcs:
         with st.expander("📚 Fuentes"):
             st.markdown(_format_sources(dossier_srcs).replace(_CITATION_SEPARATOR, ""))
+
+
+# ---------------------------------------------------------------------------
+# Top-level mode wrappers — new symmetric Club / Selección design
+# ---------------------------------------------------------------------------
+
+def _render_club(api_key: str) -> None:
+    """🏠 Investigar Club — three equal tabs: ⚽ Partido | 🔬 Equipo | 🧑 Jugador."""
+    st.markdown(
+        '<p class="hero-title">🏠 Investigar Club</p>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<p class="hero-sub">'
+        'Preparación de partido, investigación de equipo y dossier de jugadores — '
+        'todo el análisis de fútbol de clubes en un solo lugar'
+        '</p>',
+        unsafe_allow_html=True,
+    )
+
+    tabs = st.tabs(["⚽ Partido", "🔬 Equipo", "🧑 Jugador"])
+
+    with tabs[TAB_PARTIDO]:
+        st.session_state.club_active_tab = TAB_PARTIDO
+        _render_match_prep(api_key)
+
+    with tabs[TAB_EQUIPO]:
+        st.session_state.club_active_tab = TAB_EQUIPO
+        _render_match_research(api_key)
+
+    with tabs[TAB_JUGADOR]:
+        st.session_state.club_active_tab = TAB_JUGADOR
+        _render_player_research(api_key)
+
+
+def _render_seleccion(api_key: str) -> None:
+    """🌍 Investigar Selección — three equal tabs: ⚽ Partido | 🔬 Selección | 🧑 Convocado."""
+    st.markdown(
+        '<p class="hero-title">🌍 Investigar Selección</p>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<p class="hero-sub">'
+        'Partido de selecciones, historial de tu selección y dossier de convocados — '
+        'el mismo nivel de análisis adaptado al fútbol internacional'
+        '</p>',
+        unsafe_allow_html=True,
+    )
+
+    tabs = st.tabs(["⚽ Partido", "🔬 Selección", "🧑 Convocado"])
+
+    with tabs[TAB_PARTIDO]:
+        st.session_state.sel_active_tab = TAB_PARTIDO
+        _render_sel_match_tab(api_key)
+
+    with tabs[TAB_EQUIPO]:
+        st.session_state.sel_active_tab = TAB_EQUIPO
+        _render_sel_team_tab(api_key)
+
+    with tabs[TAB_JUGADOR]:
+        st.session_state.sel_active_tab = TAB_JUGADOR
+        _render_sel_player_tab(api_key)
 
 
 if __name__ == "__main__":
