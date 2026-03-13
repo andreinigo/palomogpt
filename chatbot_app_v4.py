@@ -34,12 +34,16 @@ GEMINI_FALLBACK_MODEL = "gemini-2.5-pro"
 CLAUDE_MODEL = "claude-opus-4-6"
 CLAUDE_HAIKU_MODEL = "claude-haiku-4-5"
 
-MODE_PALOMO_GPT = "palomo_gpt"
-MODE_MATCH_PREP = "match_prep"
+MODE_PALOMO_GPT     = "palomo_gpt"
+MODE_MATCH_PREP     = "match_prep"
+MODE_MATCH_RESEARCH  = "match_research"
+MODE_PLAYER_RESEARCH = "player_research"
 
 MODE_OPTIONS = {
-    MODE_PALOMO_GPT: "🎙️ PalomoGPT",
-    MODE_MATCH_PREP: "⚽ Preparación de Partidos",
+    MODE_PALOMO_GPT:      "🎙️ PalomoGPT",
+    MODE_MATCH_PREP:      "⚽ Investigar Partido",
+    MODE_MATCH_RESEARCH:  "🔬 Investigar Equipo",
+    MODE_PLAYER_RESEARCH: "🧑 Investigar Jugador",
 }
 
 CURRENT_YEAR = datetime.now().year
@@ -324,6 +328,212 @@ def _delete_match_prep(prep_id: str) -> None:
         print(f"[Supabase] Error deleting match prep: {e}")
 
 
+# --- Team Research persistence helpers ---
+
+def _save_team_research(config: dict, results: dict) -> str:
+    """Save or update a team research and return its UUID."""
+    sb = _supabase_client()
+    if not sb:
+        return ""
+    try:
+        title = config.get("team_name", "?")
+        json_results: dict = {}
+        for key, val in results.items():
+            if isinstance(val, tuple):
+                json_results[key] = {"text": val[0], "sources": val[1]}
+            elif isinstance(val, list):
+                json_results[key] = val
+            else:
+                json_results[key] = val
+
+        payload = {
+            "title": title,
+            "team_name": config.get("team_name", ""),
+            "tournament": config.get("tournament", ""),
+            "config": config,
+            "results": json_results,
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+
+        existing_id = st.session_state.get("team_research_id")
+        if existing_id:
+            sb.table("team_researches").update(payload).eq("id", existing_id).execute()
+            print(f"[Supabase] Updated team research: {existing_id} — '{title}'")
+            return existing_id
+        else:
+            row = sb.table("team_researches").insert(payload).execute()
+            res_id = row.data[0]["id"] if row.data else ""
+            st.session_state.team_research_id = res_id
+            print(f"[Supabase] Saved team research: {res_id} — '{title}'")
+            return res_id
+    except Exception as e:
+        print(f"[Supabase] Error saving team research: {e}")
+        return ""
+
+
+def _list_team_researches(limit: int = 20) -> List[Dict[str, Any]]:
+    """List recent team researches, newest first."""
+    sb = _supabase_client()
+    if not sb:
+        return []
+    try:
+        resp = (
+            sb.table("team_researches")
+            .select("id, title, team_name, tournament, created_at")
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return resp.data or []
+    except Exception as e:
+        print(f"[Supabase] Error listing team researches: {e}")
+        return []
+
+
+def _load_team_research(research_id: str) -> Optional[Dict[str, Any]]:
+    """Load a team research's config and results."""
+    sb = _supabase_client()
+    if not sb or not research_id:
+        return None
+    try:
+        resp = (
+            sb.table("team_researches")
+            .select("*")
+            .eq("id", research_id)
+            .single()
+            .execute()
+        )
+        if not resp.data:
+            return None
+        row = resp.data
+        raw_results = row.get("results", {})
+        results: dict = {}
+        val = raw_results.get("team_history", {})
+        if isinstance(val, dict) and "text" in val:
+            results["team_history"] = (val["text"], val.get("sources", []))
+        else:
+            results["team_history"] = ("", [])
+        results["roster"] = raw_results.get("roster", [])
+        return {"config": row.get("config", {}), "results": results}
+    except Exception as e:
+        print(f"[Supabase] Error loading team research {research_id}: {e}")
+        return None
+
+
+def _delete_team_research(research_id: str) -> None:
+    """Delete a team research."""
+    sb = _supabase_client()
+    if not sb or not research_id:
+        return
+    try:
+        sb.table("team_researches").delete().eq("id", research_id).execute()
+        print(f"[Supabase] Deleted team research: {research_id}")
+    except Exception as e:
+        print(f"[Supabase] Error deleting team research: {e}")
+
+
+# --- Player Research persistence helpers ---
+
+def _save_player_research(config: dict, results: dict) -> str:
+    """Save or update a player research and return its UUID."""
+    sb = _supabase_client()
+    if not sb:
+        return ""
+    try:
+        title = config.get("player_name", "?")
+        json_results: dict = {}
+        for key, val in results.items():
+            if isinstance(val, tuple):
+                json_results[key] = {"text": val[0], "sources": val[1]}
+            else:
+                json_results[key] = val
+
+        payload = {
+            "title": title,
+            "player_name": config.get("player_name", ""),
+            "team_name": config.get("team_name", ""),
+            "position": config.get("position", ""),
+            "config": config,
+            "results": json_results,
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+
+        existing_id = st.session_state.get("player_research_id")
+        if existing_id:
+            sb.table("player_researches").update(payload).eq("id", existing_id).execute()
+            print(f"[Supabase] Updated player research: {existing_id} — '{title}'")
+            return existing_id
+        else:
+            row = sb.table("player_researches").insert(payload).execute()
+            res_id = row.data[0]["id"] if row.data else ""
+            st.session_state.player_research_id = res_id
+            print(f"[Supabase] Saved player research: {res_id} — '{title}'")
+            return res_id
+    except Exception as e:
+        print(f"[Supabase] Error saving player research: {e}")
+        return ""
+
+
+def _list_player_researches(limit: int = 20) -> List[Dict[str, Any]]:
+    """List recent player researches, newest first."""
+    sb = _supabase_client()
+    if not sb:
+        return []
+    try:
+        resp = (
+            sb.table("player_researches")
+            .select("id, title, player_name, team_name, position, created_at")
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return resp.data or []
+    except Exception as e:
+        print(f"[Supabase] Error listing player researches: {e}")
+        return []
+
+
+def _load_player_research(research_id: str) -> Optional[Dict[str, Any]]:
+    """Load a player research's config and results."""
+    sb = _supabase_client()
+    if not sb or not research_id:
+        return None
+    try:
+        resp = (
+            sb.table("player_researches")
+            .select("*")
+            .eq("id", research_id)
+            .single()
+            .execute()
+        )
+        if not resp.data:
+            return None
+        row = resp.data
+        raw_results = row.get("results", {})
+        results: dict = {}
+        val = raw_results.get("dossier", {})
+        if isinstance(val, dict) and "text" in val:
+            results["dossier"] = (val["text"], val.get("sources", []))
+        else:
+            results["dossier"] = ("", [])
+        return {"config": row.get("config", {}), "results": results}
+    except Exception as e:
+        print(f"[Supabase] Error loading player research {research_id}: {e}")
+        return None
+
+
+def _delete_player_research(research_id: str) -> None:
+    """Delete a player research."""
+    sb = _supabase_client()
+    if not sb or not research_id:
+        return
+    try:
+        sb.table("player_researches").delete().eq("id", research_id).execute()
+        print(f"[Supabase] Deleted player research: {research_id}")
+    except Exception as e:
+        print(f"[Supabase] Error deleting player research: {e}")
+
+
 # ---------------------------------------------------------------------------
 # System Prompts
 # ---------------------------------------------------------------------------
@@ -605,6 +815,68 @@ REGLAS:
 - Máximo 4 líneas por jugador. Si no hay suficiente info, 2 líneas bastan.
 - Responde en español."""
 
+
+_SOLO_PLAYER_DOSSIER_PROMPT = """Eres un investigador de fútbol de élite. Tu misión es crear \
+el dossier MÁS COMPLETO posible sobre UN SOLO jugador para que un narrador de televisión \
+pueda transmitir con profundidad y precisión.
+
+JUGADOR: **{player_name}** ({player_position}) — juega en **{team_name}**
+
+Investiga A FONDO los siguientes aspectos:
+
+1. **IDENTIDAD COMPLETA**
+   - Nombre completo de nacimiento y nombre futbolístico
+   - Apodo(s) — tanto oficiales como los que usa la afición
+   - Edad, fecha de nacimiento, nacionalidad(es)
+   - Posición principal y secundaria(s), número de camiseta
+   - Estatura, peso, pierna hábil
+
+2. **TRAYECTORIA DETALLADA**
+   - Lugar de nacimiento y contexto (barrio, ciudad, contexto socioeconómico)
+   - Cantera / club formativo: cómo fue descubierto, a qué edad, anécdotas de juveniles
+   - TODOS los clubes anteriores con fechas, precio de traspaso si aplica, y rol en cada uno
+   - Momento clave que lo catapultó a la élite (debut, gol importante, actuación icónica)
+   - Cómo llegó a {team_name}: contexto de la negociación, precio, otros clubes interesados
+
+3. **VIDA PERSONAL Y DATOS CURIOSOS** 🎯
+   - Familia: padres, hermanos, pareja, hijos — especialmente si hay vínculos futbolísticos
+   - Familiares en el fútbol profesional (padre, hermano, primo, tío que haya jugado)
+   - Hobbies fuera del fútbol, pasiones conocidas
+   - Rituales o costumbres previas a partidos
+   - Celebraciones de gol icónicas y su significado
+   - Historial de lesiones relevantes y cómo las superó
+   - Personalidad: introvertido/extrovertido, líder vocal/silencioso
+   - Redes sociales: apodo, algo notable que haya publicado
+   - Obras benéficas, fundaciones, causas que apoya
+   - Récords personales, hitos, marcas históricas alcanzadas
+   - Anécdotas jugosas: declaraciones polémicas, momentos virales, curiosidades
+   - Ídolos futbolísticos que ha mencionado
+
+4. **PERFIL FUTBOLÍSTICO ESTA TEMPORADA** 📊
+   - Rol táctico actual en el equipo y cómo ha evolucionado bajo el DT actual
+   - Estadísticas COMPLETAS de esta temporada:
+     * Partidos jugados (titular/suplente), minutos
+     * Goles, asistencias, pases clave
+     * Para porteros: clean sheets, paradas, penaltis detenidos, goles recibidos por partido
+     * Para defensas: intercepciones, despejes, duelos ganados, entradas exitosas
+     * Para mediocampistas: pases completados, pases al último tercio, recuperaciones
+     * Para delanteros: tiros a puerta, regates exitosos, xG, conversión
+   - Tarjetas amarillas y rojas
+   - Estado físico actual: ¿lesionado? ¿recién recuperado? ¿en racha?
+   - Momento de forma: ¿en su mejor nivel o bajo rendimiento?
+   - Comparaciones con temporadas anteriores si hay cambio notable
+
+5. **SITUACIÓN CONTRACTUAL Y CONTEXTO**
+   - Fecha de fin de contrato si es conocida
+   - Rumores de transferencia relevantes
+   - Relación con el entrenador y la directiva
+   - Situación en su selección nacional
+
+Resalta con 🎯 los datos curiosos más impactantes para que sean fáciles de localizar.
+
+Responde en español. Sé EXHAUSTIVO y PRECISO — NO inventes datos. \
+Si no encuentras un dato específico, omítelo, pero BUSCA A FONDO antes de rendirte.
+FECHA ACTUAL: {current_date}."""
 
 
 _PALOMO_PHRASES_PROMPT = """Eres Fernando Palomo — EL narrador legendario de ESPN. \
@@ -1666,6 +1938,178 @@ def run_match_preparation(
 
 
 # ---------------------------------------------------------------------------
+# Team Research Pipeline (single club, no opponent)
+# ---------------------------------------------------------------------------
+
+def _research_single_player_solo(
+    player: Dict[str, Any],
+    team_name: str,
+    api_key: str,
+) -> Dict[str, Any]:
+    """Research a single player without opponent context. Returns {name, position, number, text, sources}."""
+    player_name = player.get("name", player.get("full_name", "Unknown"))
+    position = player.get("position", "")
+    pos_label = _POS_LABELS.get(position, position)
+
+    prompt = _SOLO_PLAYER_DOSSIER_PROMPT.format(
+        player_name=player_name,
+        player_position=pos_label,
+        team_name=team_name,
+        current_date=CURRENT_DATE,
+    )
+
+    text, sources = _gemini_request(
+        api_key=api_key,
+        system_prompt=prompt,
+        user_message=(
+            f"Dame el dossier COMPLETO de {player_name} ({pos_label}) de {team_name}. "
+            "Incluye biografía, trayectoria, vida personal, datos curiosos, "
+            "estadísticas de esta temporada y situación contractual."
+        ),
+    )
+
+    return {
+        "name": player_name,
+        "position": position,
+        "number": player.get("number", ""),
+        "text": text,
+        "sources": sources,
+    }
+
+
+def _research_team_roster_solo(
+    team_name: str,
+    api_key: str,
+    progress_cb: Optional[Callable[[str], None]] = None,
+) -> List[Dict[str, Any]]:
+    """Research a team's full roster player-by-player (no opponent context)."""
+    if progress_cb:
+        progress_cb(f"📋 Obteniendo lista de jugadores de **{team_name}**...")
+    players = _fetch_player_list(team_name, api_key)
+    total = len(players)
+    if progress_cb:
+        progress_cb(f"✅ {total} jugadores encontrados en **{team_name}**. Investigando uno por uno...")
+
+    results: List[Dict[str, Any]] = [None] * total  # type: ignore[list-item]
+    completed = 0
+    batch_size = 4
+    for batch_start in range(0, total, batch_size):
+        batch = players[batch_start: batch_start + batch_size]
+        with ThreadPoolExecutor(max_workers=batch_size) as executor:
+            future_to_idx = {
+                executor.submit(_research_single_player_solo, player, team_name, api_key): batch_start + i
+                for i, player in enumerate(batch)
+            }
+            for future in as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                try:
+                    results[idx] = future.result()
+                except Exception as e:
+                    p = players[idx]
+                    results[idx] = {
+                        "name": p.get("name", "?"),
+                        "position": p.get("position", ""),
+                        "number": p.get("number", ""),
+                        "text": f"❌ Error investigando: {e}",
+                        "sources": [],
+                    }
+                completed += 1
+                if progress_cb:
+                    pname = results[idx]["name"]
+                    progress_cb(f"🔍 [{completed}/{total}] **{pname}** ✓  ({team_name})")
+
+    return results
+
+
+def run_team_research(
+    team_name: str,
+    tournament: str,
+    api_key: str,
+    progress_cb: Optional[Callable[[str], None]] = None,
+    partial_results: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Run the full team research pipeline (history + roster) with resumability."""
+    _cb = progress_cb or (lambda _msg: None)
+    results: Dict[str, Any] = partial_results or {
+        "team_history": ("", []),
+        "roster": [],
+    }
+
+    # Phase 1: team history
+    if not _has_data(results.get("team_history")):
+        _cb(f"📊 Investigando historial de **{team_name}**...")
+        try:
+            results["team_history"] = _research_team_history(team_name, api_key)
+        except Exception as e:
+            results["team_history"] = (f"❌ Error investigando historial: {e}", [])
+        _cb("✅ Historial completado.")
+    else:
+        _cb("✅ Historial ya disponible — reutilizando.")
+
+    # Phase 2: roster player-by-player
+    if not _has_data(results.get("roster")):
+        _cb(f"👥 Investigando plantilla de **{team_name}** jugador por jugador...")
+        try:
+            results["roster"] = _research_team_roster_solo(team_name, api_key, progress_cb=_cb)
+        except Exception as e:
+            results["roster"] = []
+            _cb(f"❌ Error con plantilla de {team_name}: {e}")
+    elif _roster_has_failures(results.get("roster", [])):
+        results["roster"] = _retry_failed_roster_players(
+            results["roster"], team_name, "", api_key, progress_cb=_cb,
+        )
+    else:
+        _cb(f"✅ Plantilla de **{team_name}** ya disponible — reutilizando.")
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Player Research Pipeline (single player)
+# ---------------------------------------------------------------------------
+
+def run_player_research(
+    player_name: str,
+    team_name: str,
+    position: str,
+    api_key: str,
+    progress_cb: Optional[Callable[[str], None]] = None,
+    partial_results: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Research a single player in depth."""
+    _cb = progress_cb or (lambda _msg: None)
+    results: Dict[str, Any] = partial_results or {"dossier": ("", [])}
+
+    if not _has_data(results.get("dossier")):
+        pos_label = _POS_LABELS.get(position, position or "Jugador")
+        _cb(f"🔍 Investigando dossier de **{player_name}** ({pos_label}, {team_name})...")
+
+        prompt = _SOLO_PLAYER_DOSSIER_PROMPT.format(
+            player_name=player_name,
+            player_position=pos_label,
+            team_name=team_name,
+            current_date=CURRENT_DATE,
+        )
+        try:
+            results["dossier"] = _gemini_request(
+                api_key=api_key,
+                system_prompt=prompt,
+                user_message=(
+                    f"Dame el dossier COMPLETO de {player_name} ({pos_label}) de {team_name}. "
+                    "Incluye biografía, trayectoria, vida personal, datos curiosos, "
+                    "estadísticas de esta temporada y situación contractual. Factor WOW al máximo."
+                ),
+            )
+        except Exception as e:
+            results["dossier"] = (f"❌ Error investigando: {e}", [])
+        _cb("✅ Dossier completado.")
+    else:
+        _cb("✅ Dossier ya disponible — reutilizando.")
+
+    return results
+
+
+# ---------------------------------------------------------------------------
 # Custom CSS
 # ---------------------------------------------------------------------------
 _CUSTOM_CSS = """
@@ -1909,36 +2353,100 @@ def main() -> None:
                                 st.session_state.messages = []
                             st.rerun()
         else:
-            # Match prep mode
-            if st.session_state.get("match_results"):
-                if st.button("➕ Nueva preparación", use_container_width=True):
-                    st.session_state.pop("match_results", None)
-                    st.session_state.pop("match_config", None)
-                    st.session_state.pop("match_pdf_bytes", None)
-                    st.rerun()
+            # --- Match Prep mode ---
+            if app_mode == MODE_MATCH_PREP:
+                if st.session_state.get("match_results"):
+                    if st.button("➕ Nueva preparación", use_container_width=True):
+                        st.session_state.pop("match_results", None)
+                        st.session_state.pop("match_config", None)
+                        st.session_state.pop("match_pdf_bytes", None)
+                        st.rerun()
 
-            # List past match preps
-            preps = _list_match_preps()
-            if preps:
-                st.markdown("##### ⚽ Preparaciones")
-                for prep in preps:
-                    pid = prep["id"]
-                    title = prep.get("title", "Sin título")
+                preps = _list_match_preps()
+                if preps:
+                    st.markdown("##### ⚽ Partidos")
+                    for prep in preps:
+                        pid = prep["id"]
+                        title = prep.get("title", "Sin título")
 
-                    col_title, col_del = st.columns([5, 1])
-                    with col_title:
-                        if st.button(title, key=f"prep_{pid}", use_container_width=True):
-                            loaded = _load_match_prep(pid)
-                            if loaded:
-                                st.session_state.match_config = loaded["config"]
-                                st.session_state.match_results = loaded["results"]
-                                st.session_state.match_prep_id = pid  # track for upsert
-                                st.session_state.pop("match_pdf_bytes", None)
-                            st.rerun()
-                    with col_del:
-                        if st.button("🗑️", key=f"dprep_{pid}"):
-                            _delete_match_prep(pid)
-                            st.rerun()
+                        col_title, col_del = st.columns([5, 1])
+                        with col_title:
+                            if st.button(title, key=f"prep_{pid}", use_container_width=True):
+                                loaded = _load_match_prep(pid)
+                                if loaded:
+                                    st.session_state.match_config = loaded["config"]
+                                    st.session_state.match_results = loaded["results"]
+                                    st.session_state.match_prep_id = pid
+                                    st.session_state.pop("match_pdf_bytes", None)
+                                st.rerun()
+                        with col_del:
+                            if st.button("🗑️", key=f"dprep_{pid}"):
+                                _delete_match_prep(pid)
+                                st.rerun()
+
+            # --- Team Research mode ---
+            elif app_mode == MODE_MATCH_RESEARCH:
+                if st.session_state.get("team_research_results"):
+                    if st.button("➕ Nueva investigación", use_container_width=True):
+                        st.session_state.pop("team_research_results", None)
+                        st.session_state.pop("team_research_config", None)
+                        st.session_state.pop("team_research_id", None)
+                        st.rerun()
+
+                researches = _list_team_researches()
+                if researches:
+                    st.markdown("##### 🔬 Equipos")
+                    for res in researches:
+                        rid = res["id"]
+                        title = res.get("title", "Sin título")
+                        league = res.get("tournament", "")
+                        label = f"{title} ({league})" if league else title
+
+                        col_title, col_del = st.columns([5, 1])
+                        with col_title:
+                            if st.button(label, key=f"tres_{rid}", use_container_width=True):
+                                loaded = _load_team_research(rid)
+                                if loaded:
+                                    st.session_state.team_research_config = loaded["config"]
+                                    st.session_state.team_research_results = loaded["results"]
+                                    st.session_state.team_research_id = rid
+                                st.rerun()
+                        with col_del:
+                            if st.button("🗑️", key=f"dtres_{rid}"):
+                                _delete_team_research(rid)
+                                st.rerun()
+
+            # --- Player Research mode ---
+            elif app_mode == MODE_PLAYER_RESEARCH:
+                if st.session_state.get("player_research_results"):
+                    if st.button("➕ Nueva investigación", use_container_width=True):
+                        st.session_state.pop("player_research_results", None)
+                        st.session_state.pop("player_research_config", None)
+                        st.session_state.pop("player_research_id", None)
+                        st.rerun()
+
+                presearches = _list_player_researches()
+                if presearches:
+                    st.markdown("##### 🧑 Jugadores")
+                    for res in presearches:
+                        rid = res["id"]
+                        title = res.get("title", "Sin título")
+                        team = res.get("team_name", "")
+                        label = f"{title} ({team})" if team else title
+
+                        col_title, col_del = st.columns([5, 1])
+                        with col_title:
+                            if st.button(label, key=f"pres_{rid}", use_container_width=True):
+                                loaded = _load_player_research(rid)
+                                if loaded:
+                                    st.session_state.player_research_config = loaded["config"]
+                                    st.session_state.player_research_results = loaded["results"]
+                                    st.session_state.player_research_id = rid
+                                st.rerun()
+                        with col_del:
+                            if st.button("🗑️", key=f"dpres_{rid}"):
+                                _delete_player_research(rid)
+                                st.rerun()
 
         st.markdown("---")
         st.caption("🌐 Datos en tiempo real · Cualquier liga · Verificado con fuentes")
@@ -1951,6 +2459,12 @@ def main() -> None:
     # ---- Route to active mode ----
     if app_mode == MODE_PALOMO_GPT:
         _render_palomo_gpt(api_key, incoming_query)
+    elif app_mode == MODE_MATCH_PREP:
+        _render_match_prep(api_key)
+    elif app_mode == MODE_MATCH_RESEARCH:
+        _render_match_research(api_key)
+    elif app_mode == MODE_PLAYER_RESEARCH:
+        _render_player_research(api_key)
     else:
         _render_match_prep(api_key)
 
@@ -2181,7 +2695,7 @@ def _render_match_prep(api_key: str) -> None:
             key="mp_stadium",
         )
 
-    can_submit = bool(home_team and away_team and stadium)
+    can_submit = bool(home_team and away_team)
 
     if st.button(
         "🚀 Preparar Partido",
@@ -2458,6 +2972,315 @@ def _display_match_results(config: dict, results: dict) -> None:
             st.markdown(
                 _format_sources(p_srcs).replace(_CITATION_SEPARATOR, "")
             )
+
+
+# ---------------------------------------------------------------------------
+# Investigar Equipo mode
+# ---------------------------------------------------------------------------
+def _render_match_research(api_key: str) -> None:
+    col_h1, _ = st.columns([3, 1])
+    with col_h1:
+        st.markdown(
+            '<p class="hero-title">🔬 Investigar Equipo</p>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            '<p class="hero-sub">'
+            'Historial de temporadas y dossier completo de toda la plantilla'
+            '</p>',
+            unsafe_allow_html=True,
+        )
+
+    # If results already loaded, show them
+    if st.session_state.get("team_research_results") and st.session_state.get("team_research_config"):
+        existing = st.session_state.team_research_results
+        config = st.session_state.team_research_config
+
+        all_keys = ["team_history", "roster"]
+        missing = [k for k in all_keys if not _has_data(existing.get(k))]
+        has_player_failures = _roster_has_failures(existing.get("roster", []))
+        is_incomplete = bool(missing) or has_player_failures
+
+        if is_incomplete:
+            n_failed = sum(
+                1 for r in existing.get("roster", [])
+                if isinstance(r, dict) and r.get("text", "").startswith("❌")
+            )
+            parts = []
+            if missing:
+                parts.append(f"faltan {len(missing)} secciones")
+            if n_failed:
+                parts.append(f"{n_failed} jugadores con error")
+            st.warning(
+                f"⚠️ Análisis incompleto — {', '.join(parts)}. "
+                "Puedes continuar sin perder lo ya investigado."
+            )
+            if st.button("🔄 Continuar análisis", type="primary", use_container_width=True):
+                _run_team_research_pipeline(config, api_key, partial_results=existing)
+                return
+
+        _display_team_research_results(config, existing)
+        return
+
+    # --- Form ---
+    st.markdown("### 📋 Configuración")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        team_name = st.text_input(
+            "🏆 Nombre del Equipo",
+            placeholder="Ej: FC Barcelona",
+            key="mr_team_name",
+        )
+    with col2:
+        tournament = st.selectbox(
+            "🌍 Liga / Competición",
+            options=TOURNAMENT_OPTIONS,
+            key="mr_tournament",
+        )
+
+    can_submit = bool(team_name)
+
+    if st.button(
+        "🔬 Investigar Equipo",
+        use_container_width=True,
+        disabled=not can_submit,
+        type="primary",
+    ):
+        if not api_key:
+            st.error("⚠️ No se encontró la API key de Gemini.")
+            return
+
+        st.session_state.team_research_config = {
+            "team_name": team_name,
+            "tournament": tournament,
+        }
+        _run_team_research_pipeline(st.session_state.team_research_config, api_key)
+
+
+def _run_team_research_pipeline(
+    config: dict,
+    api_key: str,
+    partial_results: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Run (or resume) the team research pipeline."""
+    team_name = config["team_name"]
+    label = "🔄 Continuando análisis..." if partial_results else "🔍 Investigando equipo..."
+    with st.status(label, expanded=True) as status:
+        def _progress(msg: str) -> None:
+            status.write(msg)
+
+        try:
+            results = run_team_research(
+                team_name=team_name,
+                tournament=config.get("tournament", ""),
+                api_key=api_key,
+                progress_cb=_progress,
+                partial_results=partial_results,
+            )
+            st.session_state.team_research_results = results
+            status.update(label="✅ ¡Investigación completa!", state="complete", expanded=False)
+
+            try:
+                _save_team_research(config, results)
+            except Exception as e:
+                print(f"[TeamResearch] Error saving to Supabase: {e}")
+        except Exception as e:
+            if partial_results:
+                st.session_state.team_research_results = partial_results
+                try:
+                    _save_team_research(config, partial_results)
+                except Exception:
+                    pass
+            status.update(label=f"❌ Error: {e} — puedes continuar el análisis", state="error")
+            print(f"[TeamResearch] Error:\n{traceback.format_exc()}")
+
+    st.rerun()
+
+
+def _display_team_research_results(config: dict, results: dict) -> None:
+    """Render the full team research report."""
+    team = config["team_name"]
+    tournament = config.get("tournament", "")
+
+    st.markdown("---")
+
+    # ---- Team header ----
+    meta = tournament if tournament else "Investigación de Equipo"
+    st.markdown(
+        f'<div class="match-header">'
+        f'<h2>🔬 {team}</h2>'
+        f'<div class="match-meta">{meta}</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    # ---- Team History (full width) ----
+    st.markdown("### 📊 Historial de Temporadas")
+    h_text, h_srcs = results.get("team_history", ("", []))
+    st.markdown(h_text)
+    if h_srcs:
+        with st.expander("📚 Fuentes"):
+            st.markdown(_format_sources(h_srcs).replace(_CITATION_SEPARATOR, ""))
+
+    # ---- Roster (full width, by position) ----
+    st.markdown("---")
+    st.markdown("### 👥 Plantilla — Dossier por Jugador")
+    _render_roster_players(results.get("roster", []))
+
+
+# ---------------------------------------------------------------------------
+# Investigar Jugador mode
+# ---------------------------------------------------------------------------
+_PLAYER_POSITION_OPTIONS = ["GK", "DEF", "MID", "FWD"]
+
+
+def _render_player_research(api_key: str) -> None:
+    col_h1, _ = st.columns([3, 1])
+    with col_h1:
+        st.markdown(
+            '<p class="hero-title">🧑 Investigar Jugador</p>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            '<p class="hero-sub">'
+            'Dossier completo de un jugador — trayectoria, vida personal, estadísticas y más'
+            '</p>',
+            unsafe_allow_html=True,
+        )
+
+    # If results already loaded, show them
+    if st.session_state.get("player_research_results") and st.session_state.get("player_research_config"):
+        existing = st.session_state.player_research_results
+        config = st.session_state.player_research_config
+
+        is_incomplete = not _has_data(existing.get("dossier"))
+        if is_incomplete:
+            st.warning("⚠️ Dossier incompleto. Puedes continuar la investigación.")
+            if st.button("🔄 Continuar investigación", type="primary", use_container_width=True):
+                _run_player_research_pipeline(config, api_key, partial_results=existing)
+                return
+
+        _display_player_research_results(config, existing)
+        return
+
+    # --- Form ---
+    st.markdown("### 📋 Configuración")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        player_name = st.text_input(
+            "🧑 Nombre del Jugador",
+            placeholder="Ej: Lamine Yamal",
+            key="pr_player_name",
+        )
+    with col2:
+        team_name = st.text_input(
+            "🏆 Equipo Actual",
+            placeholder="Ej: FC Barcelona",
+            key="pr_team_name",
+        )
+
+    col3, _ = st.columns([1, 2])
+    with col3:
+        position = st.selectbox(
+            "📌 Posición",
+            options=_PLAYER_POSITION_OPTIONS,
+            format_func=lambda p: _POS_LABELS.get(p, p),
+            key="pr_position",
+        )
+
+    can_submit = bool(player_name and team_name)
+
+    if st.button(
+        "🧑 Investigar Jugador",
+        use_container_width=True,
+        disabled=not can_submit,
+        type="primary",
+    ):
+        if not api_key:
+            st.error("⚠️ No se encontró la API key de Gemini.")
+            return
+
+        st.session_state.player_research_config = {
+            "player_name": player_name,
+            "team_name": team_name,
+            "position": position,
+        }
+        _run_player_research_pipeline(st.session_state.player_research_config, api_key)
+
+
+def _run_player_research_pipeline(
+    config: dict,
+    api_key: str,
+    partial_results: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Run (or resume) the player research pipeline."""
+    player_name = config["player_name"]
+    team_name = config.get("team_name", "")
+    position = config.get("position", "")
+
+    label = "🔄 Continuando investigación..." if partial_results else "🔍 Investigando jugador..."
+    with st.status(label, expanded=True) as status:
+        def _progress(msg: str) -> None:
+            status.write(msg)
+
+        try:
+            results = run_player_research(
+                player_name=player_name,
+                team_name=team_name,
+                position=position,
+                api_key=api_key,
+                progress_cb=_progress,
+                partial_results=partial_results,
+            )
+            st.session_state.player_research_results = results
+            status.update(label="✅ ¡Dossier completo!", state="complete", expanded=False)
+
+            try:
+                _save_player_research(config, results)
+            except Exception as e:
+                print(f"[PlayerResearch] Error saving to Supabase: {e}")
+        except Exception as e:
+            if partial_results:
+                st.session_state.player_research_results = partial_results
+                try:
+                    _save_player_research(config, partial_results)
+                except Exception:
+                    pass
+            status.update(label=f"❌ Error: {e}", state="error")
+            print(f"[PlayerResearch] Error:\n{traceback.format_exc()}")
+
+    st.rerun()
+
+
+def _display_player_research_results(config: dict, results: dict) -> None:
+    """Render the full player research dossier."""
+    player = config["player_name"]
+    team = config.get("team_name", "")
+    position = config.get("position", "")
+    pos_label = _POS_LABELS.get(position, position)
+
+    st.markdown("---")
+
+    # ---- Player header ----
+    meta_parts = [pos_label, team]
+    meta = " · ".join(p for p in meta_parts if p)
+    st.markdown(
+        f'<div class="match-header">'
+        f'<h2>🧑 {player}</h2>'
+        f'<div class="match-meta">{meta}</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    # ---- Dossier (full width) ----
+    st.markdown("### 📋 Dossier Completo")
+    dossier_text, dossier_srcs = results.get("dossier", ("", []))
+    st.markdown(dossier_text)
+    if dossier_srcs:
+        with st.expander("📚 Fuentes"):
+            st.markdown(_format_sources(dossier_srcs).replace(_CITATION_SEPARATOR, ""))
 
 
 if __name__ == "__main__":
