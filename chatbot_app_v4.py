@@ -4518,18 +4518,31 @@ def _render_club(api_key: str) -> None:
         unsafe_allow_html=True,
     )
 
-    tabs = st.tabs(["⚽ Partido", "🔬 Equipo", "🧑 Jugador"])
+    tabs_dict = {
+        TAB_PARTIDO: "⚽ Partido",
+        TAB_EQUIPO: "🔬 Equipo",
+        TAB_JUGADOR: "🧑 Jugador",
+    }
 
-    with tabs[TAB_PARTIDO]:
+    if "club_active_tab" not in st.session_state:
         st.session_state.club_active_tab = TAB_PARTIDO
+
+    selected_tab = st.pills(
+        "Nivel de Análisis",
+        options=list(tabs_dict.keys()),
+        format_func=lambda k: tabs_dict[k],
+        key="club_active_tab",
+        label_visibility="collapsed"
+    )
+
+    if selected_tab is None:
+        selected_tab = TAB_PARTIDO
+
+    if selected_tab == TAB_PARTIDO:
         _render_match_prep(api_key)
-
-    with tabs[TAB_EQUIPO]:
-        st.session_state.club_active_tab = TAB_EQUIPO
+    elif selected_tab == TAB_EQUIPO:
         _render_match_research(api_key)
-
-    with tabs[TAB_JUGADOR]:
-        st.session_state.club_active_tab = TAB_JUGADOR
+    elif selected_tab == TAB_JUGADOR:
         _render_player_research(api_key)
 
 
@@ -4547,18 +4560,31 @@ def _render_seleccion(api_key: str) -> None:
         unsafe_allow_html=True,
     )
 
-    tabs = st.tabs(["⚽ Partido", "🔬 Selección", "🧑 Convocado"])
+    tabs_dict = {
+        TAB_PARTIDO: "⚽ Partido",
+        TAB_EQUIPO: "🔬 Selección",
+        TAB_JUGADOR: "🧑 Convocado",
+    }
 
-    with tabs[TAB_PARTIDO]:
+    if "sel_active_tab" not in st.session_state:
         st.session_state.sel_active_tab = TAB_PARTIDO
+
+    selected_tab = st.pills(
+        "Nivel de Análisis",
+        options=list(tabs_dict.keys()),
+        format_func=lambda k: tabs_dict[k],
+        key="sel_active_tab",
+        label_visibility="collapsed"
+    )
+
+    if selected_tab is None:
+        selected_tab = TAB_PARTIDO
+
+    if selected_tab == TAB_PARTIDO:
         _render_sel_match_tab(api_key)
-
-    with tabs[TAB_EQUIPO]:
-        st.session_state.sel_active_tab = TAB_EQUIPO
+    elif selected_tab == TAB_EQUIPO:
         _render_sel_team_tab(api_key)
-
-    with tabs[TAB_JUGADOR]:
-        st.session_state.sel_active_tab = TAB_JUGADOR
+    elif selected_tab == TAB_JUGADOR:
         _render_sel_player_tab(api_key)
 
 
