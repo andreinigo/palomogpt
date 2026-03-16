@@ -2606,9 +2606,13 @@ def _synthesize_one_player(
         note = response.content[0].text
         token_usage = _empty_token_usage(model=CLAUDE_HAIKU_MODEL, provider="anthropic")
         if hasattr(response, "usage") and response.usage:
-            token_usage["input_tokens"] = int(getattr(response.usage, "input_tokens", 0) or 0)
-            token_usage["output_tokens"] = int(getattr(response.usage, "output_tokens", 0) or 0)
-            token_usage["total_tokens"] = token_usage["input_tokens"] + token_usage["output_tokens"]
+            input_tok = int(getattr(response.usage, "input_tokens", 0) or 0)
+            output_tok = int(getattr(response.usage, "output_tokens", 0) or 0)
+            cache_creation = int(getattr(response.usage, "cache_creation_input_tokens", 0) or 0)
+            effective_input = input_tok + round(cache_creation * 0.25)
+            token_usage["input_tokens"] = effective_input
+            token_usage["output_tokens"] = output_tok
+            token_usage["total_tokens"] = effective_input + output_tok
         return {
             **player,
             "text": note.strip(),
@@ -2739,11 +2743,20 @@ def _gemini_request(
             text = response.text or ""
             token_usage = _empty_token_usage(model=model, provider="google")
             if hasattr(response, "usage_metadata") and response.usage_metadata:
-                token_usage["input_tokens"] = int(getattr(response.usage_metadata, "prompt_token_count", 0) or 0)
-                token_usage["output_tokens"] = int(getattr(response.usage_metadata, "candidates_token_count", 0) or 0)
-                token_usage["total_tokens"] = int(getattr(response.usage_metadata, "total_token_count", 0) or 0)
-                if not token_usage["total_tokens"]:
-                    token_usage["total_tokens"] = token_usage["input_tokens"] + token_usage["output_tokens"]
+                um = response.usage_metadata
+                input_tok = int(getattr(um, "prompt_token_count", 0) or 0)
+                candidates_tok = int(getattr(um, "candidates_token_count", 0) or 0)
+                thoughts_tok = int(getattr(um, "thoughts_token_count", 0) or 0)
+                total_tok = int(getattr(um, "total_token_count", 0) or 0)
+                # Thinking tokens (thoughts_tok) are billed at the output rate.
+                # Use total - input as output to capture them even if thoughts_token_count
+                # is unavailable (older SDK versions won't have the field).
+                output_tok = thoughts_tok + candidates_tok
+                if total_tok and not output_tok:
+                    output_tok = max(0, total_tok - input_tok)
+                token_usage["input_tokens"] = input_tok
+                token_usage["output_tokens"] = output_tok
+                token_usage["total_tokens"] = total_tok if total_tok else (input_tok + output_tok)
             token_usage["grounding_requests"] = _extract_gemini_search_units(response, model, use_search)
 
             # Extract sources from grounding metadata
@@ -2843,9 +2856,16 @@ def _claude_request(
     print(f"[Claude] Response received ({len(text)} chars)")
     token_usage = _empty_token_usage(model=CLAUDE_MODEL, provider="anthropic")
     if hasattr(response, "usage") and response.usage:
-        token_usage["input_tokens"] = int(getattr(response.usage, "input_tokens", 0) or 0)
-        token_usage["output_tokens"] = int(getattr(response.usage, "output_tokens", 0) or 0)
-        token_usage["total_tokens"] = token_usage["input_tokens"] + token_usage["output_tokens"]
+        input_tok = int(getattr(response.usage, "input_tokens", 0) or 0)
+        output_tok = int(getattr(response.usage, "output_tokens", 0) or 0)
+        # cache_creation_input_tokens are billed at 1.25× the normal input rate.
+        # We convert them to equivalent regular input tokens so the existing
+        # per-million input rate produces the correct cost.
+        cache_creation = int(getattr(response.usage, "cache_creation_input_tokens", 0) or 0)
+        effective_input = input_tok + round(cache_creation * 0.25)  # add the 25% surcharge as extra tokens
+        token_usage["input_tokens"] = effective_input
+        token_usage["output_tokens"] = output_tok
+        token_usage["total_tokens"] = effective_input + output_tok
         token_usage["grounding_requests"] = _extract_claude_search_units(response)
     return text, [], token_usage  # no grounding sources from Claude
 
