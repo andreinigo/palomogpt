@@ -7,11 +7,13 @@
 Powered by Google Gemini with Google Search grounding.
 """
 from __future__ import annotations
+import hashlib
 import unicodedata
+import uuid
 
 import traceback
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import json
 import re
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -140,6 +142,116 @@ SEL_TAB_CONVOCADO = TAB_JUGADOR
 # Club tab session-state key
 CLUB_ACTIVE_TAB_KEY = "club_active_tab"
 SEL_ACTIVE_TAB_KEY  = "sel_active_tab"
+
+DASHBOARD_ACCESS_STATE_KEY = "dashboard_access_granted"
+DASHBOARD_FILTER_OPTIONS = {
+    "all": "All time",
+    "7d": "7d",
+    "30d": "30d",
+    "90d": "90d",
+}
+
+USAGE_RUNTIME = "runtime"
+USAGE_BACKFILL = "backfill"
+
+_DEFAULT_PRICING = {
+    "input_per_million": 0.0,
+    "input_long_per_million": 0.0,
+    "output_per_million": 0.0,
+    "output_long_per_million": 0.0,
+    "search_per_unit": 0.0,
+    "long_context_threshold": 200_000,
+}
+
+MODEL_PRICING = {
+    GEMINI_MODEL: {
+        "input_per_million": 2.0,
+        "input_long_per_million": 4.0,
+        "output_per_million": 12.0,
+        "output_long_per_million": 18.0,
+        "search_per_unit": 14.0 / 1000.0,
+        "long_context_threshold": 200_000,
+    },
+    GEMINI_FALLBACK_MODEL: {
+        "input_per_million": 1.25,
+        "input_long_per_million": 2.50,
+        "output_per_million": 10.0,
+        "output_long_per_million": 15.0,
+        "search_per_unit": 35.0 / 1000.0,
+        "long_context_threshold": 200_000,
+    },
+    CLAUDE_MODEL: {
+        "input_per_million": 5.0,
+        "input_long_per_million": 5.0,
+        "output_per_million": 25.0,
+        "output_long_per_million": 25.0,
+        "search_per_unit": 10.0 / 1000.0,
+        "long_context_threshold": 200_000,
+    },
+    CLAUDE_HAIKU_MODEL: {
+        "input_per_million": 1.0,
+        "input_long_per_million": 1.0,
+        "output_per_million": 5.0,
+        "output_long_per_million": 5.0,
+        "search_per_unit": 0.0,
+        "long_context_threshold": 200_000,
+    },
+}
+
+BACKFILL_SPECS = [
+    {
+        "table": "match_preps",
+        "select": "id, title, home_team, away_team, created_at, results",
+        "source_type": "match_prep",
+        "workflow": "match_preparation",
+        "title_fn": lambda row: str(row.get("title") or f"{row.get('home_team', '?')} vs {row.get('away_team', '?')}"),
+        "subject_fn": lambda row: f"{row.get('home_team', '?')} vs {row.get('away_team', '?')}",
+    },
+    {
+        "table": "team_researches",
+        "select": "id, title, team_name, created_at, results",
+        "source_type": "team_research",
+        "workflow": "team_research",
+        "title_fn": lambda row: str(row.get("title") or row.get("team_name") or "Equipo"),
+        "subject_fn": lambda row: str(row.get("team_name") or ""),
+    },
+    {
+        "table": "player_researches",
+        "select": "id, title, player_name, team_name, created_at, results",
+        "source_type": "player_research",
+        "workflow": "player_research",
+        "title_fn": lambda row: str(row.get("title") or row.get("player_name") or "Jugador"),
+        "subject_fn": lambda row: (
+            f"{row.get('player_name', '')} · {row.get('team_name', '')}".strip(" ·")
+        ),
+    },
+    {
+        "table": "national_team_researches",
+        "select": "id, title, country, created_at, results",
+        "source_type": "national_team_research",
+        "workflow": "national_team_research",
+        "title_fn": lambda row: str(row.get("title") or row.get("country") or "Selección"),
+        "subject_fn": lambda row: str(row.get("country") or ""),
+    },
+    {
+        "table": "national_match_preps",
+        "select": "id, title, home_country, away_country, created_at, results",
+        "source_type": "national_match_prep",
+        "workflow": "national_match_prep",
+        "title_fn": lambda row: str(row.get("title") or f"{row.get('home_country', '?')} vs {row.get('away_country', '?')}"),
+        "subject_fn": lambda row: f"{row.get('home_country', '?')} vs {row.get('away_country', '?')}",
+    },
+    {
+        "table": "national_player_researches",
+        "select": "id, title, player_name, country, created_at, results",
+        "source_type": "national_player_research",
+        "workflow": "national_player_research",
+        "title_fn": lambda row: str(row.get("title") or row.get("player_name") or "Convocado"),
+        "subject_fn": lambda row: (
+            f"{row.get('player_name', '')} · {row.get('country', '')}".strip(" ·")
+        ),
+    },
+]
 # Supabase persistence helpers
 # ---------------------------------------------------------------------------
 
@@ -549,6 +661,448 @@ def _render_workflow_metrics(metrics: Any, title: str = "📈 Uso de tokens") ->
             )
             if calls_table:
                 st.markdown(calls_table)
+
+
+def _utcnow_iso() -> str:
+    """Return an ISO timestamp in UTC."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _new_usage_run_id(prefix: str) -> str:
+    """Create a unique idempotency key for one billable execution."""
+    return f"{prefix}:{uuid.uuid4().hex}"
+
+
+def _backfill_run_id(source_type: str, source_id: str) -> str:
+    """Create a deterministic run id so historical backfills can be retried safely."""
+    digest = hashlib.sha256(f"{source_type}:{source_id}".encode("utf-8")).hexdigest()[:24]
+    return f"backfill:{source_type}:{digest}"
+
+
+def _workflow_step_count(metrics: Any) -> int:
+    """Return the number of recorded workflow steps."""
+    normalized = _init_workflow_metrics("workflow", metrics)
+    return len([step for step in normalized.get("steps", []) if isinstance(step, dict)])
+
+
+def _slice_workflow_metrics(metrics: Any, start_index: int = 0) -> Dict[str, Any]:
+    """Return only the workflow steps added after a known step index."""
+    normalized = _init_workflow_metrics("workflow", metrics)
+    steps = normalized.get("steps", [])
+    sliced_steps = [dict(step) for step in steps[start_index:] if isinstance(step, dict)]
+    sliced = {
+        "workflow": str(normalized.get("workflow") or "workflow"),
+        "steps": sliced_steps,
+        "totals": _empty_token_usage(),
+    }
+    for step in sliced_steps:
+        _add_token_usage(sliced["totals"], step)
+    return sliced
+
+
+def _pricing_for_model(model: str) -> Dict[str, float]:
+    """Return pricing metadata for a tracked model."""
+    pricing = MODEL_PRICING.get(model)
+    if pricing:
+        return pricing
+    return dict(_DEFAULT_PRICING)
+
+
+def _estimate_usage_cost(tokens: Any) -> float:
+    """Estimate the raw provider cost for one normalized usage payload."""
+    usage = _normalize_token_usage(tokens)
+    pricing = _pricing_for_model(usage.get("model", ""))
+    threshold = int(pricing.get("long_context_threshold", 200_000) or 200_000)
+    is_long_context = usage["input_tokens"] > threshold
+
+    input_rate = pricing["input_long_per_million"] if is_long_context else pricing["input_per_million"]
+    output_rate = pricing["output_long_per_million"] if is_long_context else pricing["output_per_million"]
+
+    cost = 0.0
+    cost += (usage["input_tokens"] / 1_000_000.0) * input_rate
+    cost += (usage["output_tokens"] / 1_000_000.0) * output_rate
+    cost += usage["grounding_requests"] * float(pricing.get("search_per_unit", 0.0) or 0.0)
+    return round(cost, 6)
+
+
+def _estimate_workflow_cost(metrics: Any) -> float:
+    """Estimate total raw provider cost for a workflow metrics payload."""
+    normalized = _init_workflow_metrics("workflow", metrics)
+    return round(
+        sum(_estimate_usage_cost(step) for step in normalized.get("steps", []) if isinstance(step, dict)),
+        6,
+    )
+
+
+def _coerce_datetime(value: Any) -> Optional[datetime]:
+    """Parse a Supabase datetime string into a timezone-aware UTC datetime."""
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(text)
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _relative_window_start(filter_key: str) -> Optional[str]:
+    """Return the ISO lower bound for a dashboard date filter."""
+    days_map = {"7d": 7, "30d": 30, "90d": 90}
+    days = days_map.get(filter_key)
+    if not days:
+        return None
+    return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+
+def _format_cost(value: Any) -> str:
+    """Format raw USD cost for dashboard display."""
+    amount = float(value or 0.0)
+    if amount >= 100:
+        return f"${amount:,.2f}"
+    if amount >= 1:
+        return f"${amount:,.4f}"
+    return f"${amount:,.6f}"
+
+
+def _extract_gemini_search_units(response: Any, model_name: str, use_search: bool) -> int:
+    """Estimate billable Gemini grounding units from grounding metadata."""
+    if not use_search:
+        return 0
+
+    try:
+        candidate = response.candidates[0]
+    except (AttributeError, IndexError, TypeError):
+        return 0
+
+    grounding = getattr(candidate, "grounding_metadata", None)
+    if not grounding:
+        return 0
+
+    queries = getattr(grounding, "web_search_queries", None)
+    if queries is None and hasattr(grounding, "get"):
+        queries = grounding.get("web_search_queries")
+    query_count = len(list(queries or []))
+
+    chunks = getattr(grounding, "grounding_chunks", None)
+    has_chunks = bool(chunks)
+    has_search_entry = bool(getattr(grounding, "search_entry_point", None))
+    has_grounding_signal = query_count > 0 or has_chunks or has_search_entry
+
+    if model_name.startswith("gemini-3"):
+        if query_count > 0:
+            return query_count
+        return 1 if has_grounding_signal else 0
+
+    return 1 if has_grounding_signal else 0
+
+
+def _extract_claude_search_units(response: Any) -> int:
+    """Read Claude server-side web search usage when available."""
+    usage = getattr(response, "usage", None)
+    server_tool_use = getattr(usage, "server_tool_use", None)
+    if server_tool_use is None and isinstance(usage, dict):
+        server_tool_use = usage.get("server_tool_use")
+
+    if isinstance(server_tool_use, dict):
+        return int(server_tool_use.get("web_search_requests", 0) or 0)
+
+    return int(getattr(server_tool_use, "web_search_requests", 0) or 0)
+
+
+def _fetch_table_rows(
+    table_name: str,
+    columns: str,
+    order_column: str = "created_at",
+    descending: bool = False,
+    gte_created_at: Optional[str] = None,
+    page_size: int = 500,
+) -> List[Dict[str, Any]]:
+    """Fetch all rows from a Supabase table using page ranges."""
+    sb = _supabase_client()
+    if not sb:
+        return []
+
+    all_rows: List[Dict[str, Any]] = []
+    start = 0
+    while True:
+        try:
+            query = (
+                sb.table(table_name)
+                .select(columns)
+                .order(order_column, desc=descending)
+                .range(start, start + page_size - 1)
+            )
+            if gte_created_at:
+                query = query.gte("created_at", gte_created_at)
+            resp = query.execute()
+        except Exception as e:
+            print(f"[Supabase] Error fetching {table_name}: {e}")
+            break
+
+        batch = resp.data or []
+        all_rows.extend(batch)
+        if len(batch) < page_size:
+            break
+        start += page_size
+
+    return all_rows
+
+
+def _usage_run_exists(run_id: str) -> bool:
+    """Return whether a usage run already exists in the ledger."""
+    sb = _supabase_client()
+    if not sb or not run_id:
+        return False
+    try:
+        resp = sb.table("usage_runs").select("run_id").eq("run_id", run_id).limit(1).execute()
+        return bool(resp.data)
+    except Exception as e:
+        print(f"[Supabase] Error checking usage run {run_id}: {e}")
+        return False
+
+
+def _save_usage_run(
+    run_id: str,
+    source_type: str,
+    source_id: str,
+    workflow: str,
+    title: str,
+    subject: str,
+    metrics: Any,
+    ingest_source: str = USAGE_RUNTIME,
+    created_at: Optional[str] = None,
+) -> bool:
+    """Persist one usage run to the ledger, using run_id for idempotency."""
+    sb = _supabase_client()
+    if not sb or not run_id:
+        return False
+
+    normalized = _init_workflow_metrics(workflow, metrics)
+    payload = {
+        "run_id": run_id,
+        "source_type": source_type,
+        "source_id": source_id or None,
+        "workflow": str(normalized.get("workflow") or workflow),
+        "title": title or "",
+        "subject": subject or "",
+        "totals": normalized.get("totals", _empty_token_usage()),
+        "steps": normalized.get("steps", []),
+        "estimated_cost_usd": _estimate_workflow_cost(normalized),
+        "ingest_source": ingest_source,
+    }
+    if created_at:
+        payload["created_at"] = created_at
+
+    try:
+        sb.table("usage_runs").upsert(payload, on_conflict="run_id").execute()
+        return True
+    except Exception as e:
+        print(f"[Supabase] Error saving usage run {run_id}: {e}")
+        return False
+
+
+def _load_usage_runs(filter_key: str = "all") -> List[Dict[str, Any]]:
+    """Load usage ledger rows for the dashboard."""
+    lower_bound = _relative_window_start(filter_key)
+    rows = _fetch_table_rows(
+        table_name="usage_runs",
+        columns="id, run_id, source_type, source_id, workflow, title, subject, totals, steps, estimated_cost_usd, created_at, ingest_source",
+        order_column="created_at",
+        descending=True,
+        gte_created_at=lower_bound,
+    )
+    normalized_rows: List[Dict[str, Any]] = []
+    for row in rows:
+        normalized_rows.append(
+            {
+                **row,
+                "totals": _normalize_token_usage(row.get("totals")),
+                "steps": [dict(step) for step in row.get("steps", []) if isinstance(step, dict)],
+                "estimated_cost_usd": float(row.get("estimated_cost_usd", 0.0) or 0.0),
+            }
+        )
+    return normalized_rows
+
+
+def _aggregate_usage_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Aggregate top-level dashboard KPIs across usage rows."""
+    totals = _empty_token_usage()
+    total_cost = 0.0
+    for row in rows:
+        _add_token_usage(totals, row.get("totals"))
+        total_cost += float(row.get("estimated_cost_usd", 0.0) or 0.0)
+    return {
+        "runs": len(rows),
+        "totals": totals,
+        "estimated_cost_usd": round(total_cost, 6),
+    }
+
+
+def _aggregate_usage_by_model(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Aggregate usage step metrics by model and provider."""
+    grouped: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for row in rows:
+        for step in row.get("steps", []):
+            usage = _normalize_token_usage(step)
+            key = (usage.get("provider", ""), usage.get("model", ""))
+            current = grouped.setdefault(
+                key,
+                {
+                    "provider": usage.get("provider", "") or "n/a",
+                    "model": usage.get("model", "") or "n/a",
+                    "calls": 0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "total_tokens": 0,
+                    "grounding_requests": 0,
+                    "estimated_cost_usd": 0.0,
+                },
+            )
+            current["calls"] += 1
+            current["input_tokens"] += usage["input_tokens"]
+            current["output_tokens"] += usage["output_tokens"]
+            current["total_tokens"] += usage["total_tokens"]
+            current["grounding_requests"] += usage["grounding_requests"]
+            current["estimated_cost_usd"] += _estimate_usage_cost(usage)
+
+    return sorted(
+        grouped.values(),
+        key=lambda item: (float(item["estimated_cost_usd"]), int(item["total_tokens"])),
+        reverse=True,
+    )
+
+
+def _aggregate_usage_by_workflow(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Aggregate usage ledger rows by workflow and source type."""
+    grouped: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for row in rows:
+        key = (str(row.get("workflow") or ""), str(row.get("source_type") or ""))
+        current = grouped.setdefault(
+            key,
+            {
+                "workflow": row.get("workflow", "") or "n/a",
+                "source_type": row.get("source_type", "") or "n/a",
+                "runs": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+                "grounding_requests": 0,
+                "estimated_cost_usd": 0.0,
+            },
+        )
+        current["runs"] += 1
+        totals = _normalize_token_usage(row.get("totals"))
+        current["input_tokens"] += totals["input_tokens"]
+        current["output_tokens"] += totals["output_tokens"]
+        current["total_tokens"] += totals["total_tokens"]
+        current["grounding_requests"] += totals["grounding_requests"]
+        current["estimated_cost_usd"] += float(row.get("estimated_cost_usd", 0.0) or 0.0)
+
+    return sorted(
+        grouped.values(),
+        key=lambda item: (float(item["estimated_cost_usd"]), int(item["total_tokens"])),
+        reverse=True,
+    )
+
+
+def _serialize_usage_recent_rows(rows: List[Dict[str, Any]], limit: int = 15) -> List[Dict[str, Any]]:
+    """Build the recent-runs table shown in the admin dashboard."""
+    recent: List[Dict[str, Any]] = []
+    for row in rows[:limit]:
+        parsed = _coerce_datetime(row.get("created_at"))
+        models: List[str] = []
+        for step in row.get("steps", []):
+            model = str(step.get("model", "") or "")
+            if model and model not in models:
+                models.append(model)
+        recent.append(
+            {
+                "When": parsed.astimezone().strftime("%Y-%m-%d %H:%M") if parsed else str(row.get("created_at", "")),
+                "Workflow": str(row.get("workflow") or "n/a"),
+                "Type": str(row.get("source_type") or "n/a"),
+                "Title": str(row.get("title") or row.get("subject") or "n/a"),
+                "Models": ", ".join(models) if models else "n/a",
+                "Search": _format_metric_number(_normalize_token_usage(row.get("totals")).get("grounding_requests")),
+                "Cost": _format_cost(row.get("estimated_cost_usd")),
+            }
+        )
+    return recent
+
+
+def _backfill_usage_runs() -> Dict[str, int]:
+    """Backfill recoverable structured workflow history into the usage ledger."""
+    processed = 0
+    empty = 0
+    existing = 0
+    for spec in BACKFILL_SPECS:
+        rows = _fetch_table_rows(
+            table_name=spec["table"],
+            columns=spec["select"],
+            order_column="created_at",
+            descending=False,
+        )
+        for row in rows:
+            source_id = str(row.get("id") or "")
+            metrics = _init_workflow_metrics(spec["workflow"], (row.get("results") or {}).get("workflow_metrics"))
+            if not metrics.get("steps"):
+                empty += 1
+                continue
+            run_id = _backfill_run_id(spec["source_type"], source_id)
+            if _usage_run_exists(run_id):
+                existing += 1
+                continue
+            _save_usage_run(
+                run_id=run_id,
+                source_type=spec["source_type"],
+                source_id=source_id,
+                workflow=spec["workflow"],
+                title=spec["title_fn"](row),
+                subject=spec["subject_fn"](row),
+                metrics=metrics,
+                ingest_source=USAGE_BACKFILL,
+                created_at=row.get("created_at"),
+            )
+            processed += 1
+    return {"processed": processed, "empty": empty, "existing": existing}
+
+
+def _persist_usage_run_safe(
+    run_id: str,
+    source_type: str,
+    source_id: str,
+    workflow: str,
+    title: str,
+    subject: str,
+    metrics: Any,
+    ingest_source: str = USAGE_RUNTIME,
+    created_at: Optional[str] = None,
+    allow_empty: bool = False,
+) -> None:
+    """Persist usage without letting telemetry failures break the user flow."""
+    normalized = _init_workflow_metrics(workflow, metrics)
+    if not allow_empty and not normalized.get("steps"):
+        return
+    try:
+        _save_usage_run(
+            run_id=run_id,
+            source_type=source_type,
+            source_id=source_id,
+            workflow=workflow,
+            title=title,
+            subject=subject,
+            metrics=normalized,
+            ingest_source=ingest_source,
+            created_at=created_at,
+        )
+    except Exception as e:
+        print(f"[Usage] Failed to persist usage for {run_id}: {e}")
 
 
 # --- Match Prep persistence helpers ---
@@ -1990,7 +2544,7 @@ def generate_match_pdf(
     results: dict,
     api_key: str = "",
     progress_cb: Optional[Callable[[str], None]] = None,
-) -> bytes:
+) -> Tuple[bytes, Dict[str, Any]]:
     """Generate a complete match preparation PDF.
 
     If api_key is provided, synthesizes verbose player dossiers into compact
@@ -2003,13 +2557,21 @@ def generate_match_pdf(
 
     # Synthesize rosters before PDF generation
     synth_results = dict(results)  # shallow copy to avoid mutating original
+    export_metrics = _init_workflow_metrics("match_pdf_export")
     if api_key:
         for key in ("home_roster", "away_roster"):
             roster = results.get(key, [])
             if roster:
                 label = "Local" if "home" in key else "Visitante"
                 _cb(f"Sintetizando {len(roster)} jugadores ({label})...")
-                synth_results[key] = _synthesize_roster_for_pdf(roster, api_key, progress_cb=progress_cb)
+                synthesized_roster, roster_metrics = _synthesize_roster_for_pdf(
+                    roster,
+                    api_key,
+                    progress_cb=progress_cb,
+                    team_label=label,
+                )
+                synth_results[key] = synthesized_roster
+                _merge_workflow_metrics(export_metrics, roster_metrics)
 
     _cb("Generando PDF...")
     pdf = _MatchPDF(config)
@@ -2022,8 +2584,8 @@ def generate_match_pdf(
     # Additionally, fpdf2 returns a bytearray, which Streamlit also does not support.
     out = pdf.output()
     if isinstance(out, str):
-        return out.encode('latin1')
-    return bytes(out)
+        return out.encode('latin1'), export_metrics
+    return bytes(out), export_metrics
 
 
 def _synthesize_one_player(
@@ -2042,10 +2604,16 @@ def _synthesize_one_player(
             messages=[{"role": "user", "content": f"Sintetiza este dossier:\n\n{raw_text}"}],
         )
         note = response.content[0].text
+        token_usage = _empty_token_usage(model=CLAUDE_HAIKU_MODEL, provider="anthropic")
+        if hasattr(response, "usage") and response.usage:
+            token_usage["input_tokens"] = int(getattr(response.usage, "input_tokens", 0) or 0)
+            token_usage["output_tokens"] = int(getattr(response.usage, "output_tokens", 0) or 0)
+            token_usage["total_tokens"] = token_usage["input_tokens"] + token_usage["output_tokens"]
         return {
             **player,
             "text": note.strip(),
             "raw_text": raw_text,
+            "_pdf_synthesis_tokens": token_usage,
         }
     except Exception as e:
         print(f"[PDF Synthesis] Error for {player.get('name', '?')}: {e}")
@@ -2056,7 +2624,8 @@ def _synthesize_roster_for_pdf(
     roster: List[Dict[str, Any]],
     api_key: str,
     progress_cb: Optional[Callable[[str], None]] = None,
-) -> List[Dict[str, Any]]:
+    team_label: str = "",
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """Synthesize verbose player dossiers into compact broadcast notes via Claude Haiku.
     
     Uses parallel requests (up to 8 concurrent) for speed.
@@ -2064,12 +2633,13 @@ def _synthesize_roster_for_pdf(
     claude_key = st.secrets.get("ANTHROPIC_API_KEY", "")
     if not claude_key:
         print("[PDF Synthesis] No ANTHROPIC_API_KEY — skipping synthesis.")
-        return roster
+        return roster, _init_workflow_metrics("match_pdf_export")
 
     client = anthropic.Anthropic(api_key=claude_key)
     synthesized: List[Optional[Dict[str, Any]]] = [None] * len(roster)
     done_count = 0
     total = len(roster)
+    export_metrics = _init_workflow_metrics("match_pdf_export")
 
     def _cb(msg: str) -> None:
         if progress_cb:
@@ -2091,7 +2661,22 @@ def _synthesize_roster_for_pdf(
             name = roster[idx].get("name", "?")
             _cb(f"  ✓ {name} ({done_count}/{total})")
 
-    return [p for p in synthesized if p is not None]
+    cleaned: List[Dict[str, Any]] = []
+    for player in [p for p in synthesized if p is not None]:
+        tokens = _normalize_token_usage(player.get("_pdf_synthesis_tokens"))
+        if tokens["total_tokens"] or tokens["grounding_requests"]:
+            _record_workflow_step(
+                export_metrics,
+                "match_pdf_export.player_synthesis",
+                f"PDF synthesis ({team_label})" if team_label else "PDF synthesis",
+                tokens,
+                entity=str(player.get("name", "") or ""),
+            )
+        cleaned_player = dict(player)
+        cleaned_player.pop("_pdf_synthesis_tokens", None)
+        cleaned.append(cleaned_player)
+
+    return cleaned, export_metrics
 
 
 # ---------------------------------------------------------------------------
@@ -2153,13 +2738,13 @@ def _gemini_request(
 
             text = response.text or ""
             token_usage = _empty_token_usage(model=model, provider="google")
-            token_usage["grounding_requests"] = 1 if use_search else 0
             if hasattr(response, "usage_metadata") and response.usage_metadata:
                 token_usage["input_tokens"] = int(getattr(response.usage_metadata, "prompt_token_count", 0) or 0)
                 token_usage["output_tokens"] = int(getattr(response.usage_metadata, "candidates_token_count", 0) or 0)
                 token_usage["total_tokens"] = int(getattr(response.usage_metadata, "total_token_count", 0) or 0)
                 if not token_usage["total_tokens"]:
                     token_usage["total_tokens"] = token_usage["input_tokens"] + token_usage["output_tokens"]
+            token_usage["grounding_requests"] = _extract_gemini_search_units(response, model, use_search)
 
             # Extract sources from grounding metadata
             sources: List[Dict[str, str]] = []
@@ -2261,6 +2846,7 @@ def _claude_request(
         token_usage["input_tokens"] = int(getattr(response.usage, "input_tokens", 0) or 0)
         token_usage["output_tokens"] = int(getattr(response.usage, "output_tokens", 0) or 0)
         token_usage["total_tokens"] = token_usage["input_tokens"] + token_usage["output_tokens"]
+        token_usage["grounding_requests"] = _extract_claude_search_units(response)
     return text, [], token_usage  # no grounding sources from Claude
 
 
@@ -3537,16 +4123,7 @@ _EXAMPLE_QUERIES = [
 # ---------------------------------------------------------------------------
 # Streamlit App
 # ---------------------------------------------------------------------------
-def main() -> None:
-    st.set_page_config(
-        page_title="PalomoFacts · Football Intelligence",
-        page_icon="⚽",
-        layout="wide",
-        initial_sidebar_state="expanded",
-    )
-
-    st.markdown(_CUSTOM_CSS, unsafe_allow_html=True)
-
+def _render_root_page() -> None:
     api_key = st.secrets.get("GEMINI_API_KEY", "")
 
     # ---- Session state init ----
@@ -3835,6 +4412,160 @@ def main() -> None:
         _render_club(api_key)
 
 
+def _dashboard_access_granted() -> bool:
+    """Render the admin access gate and return whether the dashboard is unlocked."""
+    expected_key = str(st.secrets.get("DASHBOARD_ACCESS_KEY", "") or "")
+    if st.session_state.get(DASHBOARD_ACCESS_STATE_KEY):
+        return True
+
+    st.markdown(
+        '<p class="hero-title">📊 Usage Dashboard</p>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<p class="hero-sub">Hidden admin view for raw provider cost, tokens, and web-search usage.</p>',
+        unsafe_allow_html=True,
+    )
+
+    if not expected_key:
+        st.error("Configura `DASHBOARD_ACCESS_KEY` en los secrets de Streamlit para habilitar este dashboard.")
+        return False
+
+    with st.form("dashboard_access_form", clear_on_submit=False):
+        access_key = st.text_input("Access key", type="password")
+        submitted = st.form_submit_button("Enter dashboard", use_container_width=True, type="primary")
+        if submitted:
+            if access_key == expected_key:
+                st.session_state[DASHBOARD_ACCESS_STATE_KEY] = True
+                st.rerun()
+            st.error("Clave incorrecta.")
+    return False
+
+
+def _render_dashboard_page() -> None:
+    """Render the hidden admin dashboard at /dashboard."""
+    if not _dashboard_access_granted():
+        return
+
+    st.markdown(
+        '<p class="hero-title">📊 Usage Dashboard</p>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<p class="hero-sub">Overall app usage across models, workflows, web search, and raw provider cost.</p>',
+        unsafe_allow_html=True,
+    )
+
+    controls_col, backfill_col, logout_col = st.columns([3, 2, 1])
+    with controls_col:
+        filter_key = st.pills(
+            "Window",
+            options=list(DASHBOARD_FILTER_OPTIONS.keys()),
+            default="all",
+            format_func=lambda key: DASHBOARD_FILTER_OPTIONS[key],
+            key="dashboard_window",
+        )
+        if not filter_key:
+            filter_key = "all"
+    with backfill_col:
+        st.markdown("<div style='height: 1.9rem;'></div>", unsafe_allow_html=True)
+        if st.button("Backfill history", use_container_width=True):
+            result = _backfill_usage_runs()
+            st.success(
+                f"Backfill inserted {result['processed']} records, skipped {result['existing']} already in the ledger, "
+                f"and ignored {result['empty']} without metrics."
+            )
+    with logout_col:
+        st.markdown("<div style='height: 1.9rem;'></div>", unsafe_allow_html=True)
+        if st.button("Lock", use_container_width=True):
+            st.session_state[DASHBOARD_ACCESS_STATE_KEY] = False
+            st.rerun()
+
+    usage_rows = _load_usage_runs(filter_key)
+    aggregate = _aggregate_usage_rows(usage_rows)
+    totals = aggregate["totals"]
+    by_model = _aggregate_usage_by_model(usage_rows)
+    by_workflow = _aggregate_usage_by_workflow(usage_rows)
+    recent_rows = _serialize_usage_recent_rows(usage_rows, limit=15)
+
+    metric_cols = st.columns(6)
+    metric_cols[0].metric("Raw Cost", _format_cost(aggregate["estimated_cost_usd"]))
+    metric_cols[1].metric("Runs", _format_metric_number(aggregate["runs"]))
+    metric_cols[2].metric("Input", _format_metric_number(totals["input_tokens"]))
+    metric_cols[3].metric("Output", _format_metric_number(totals["output_tokens"]))
+    metric_cols[4].metric("Total", _format_metric_number(totals["total_tokens"]))
+    metric_cols[5].metric("Web Search", _format_metric_number(totals["grounding_requests"]))
+
+    st.caption(
+        "Note: older structured workflows can be backfilled from saved `workflow_metrics`, "
+        "but historical PalomoGPT traffic and older PDF exports from before this release were not persisted."
+    )
+
+    if not usage_rows:
+        st.info("No usage data found yet. Run the app or use backfill to populate the ledger.")
+        return
+
+    st.markdown("### By Model")
+    model_rows = [
+        {
+            "Provider": row["provider"],
+            "Model": row["model"],
+            "Calls": _format_metric_number(row["calls"]),
+            "Input": _format_metric_number(row["input_tokens"]),
+            "Output": _format_metric_number(row["output_tokens"]),
+            "Total": _format_metric_number(row["total_tokens"]),
+            "Search": _format_metric_number(row["grounding_requests"]),
+            "Cost": _format_cost(row["estimated_cost_usd"]),
+        }
+        for row in by_model
+    ]
+    st.dataframe(model_rows, use_container_width=True, hide_index=True)
+
+    st.markdown("### By Workflow")
+    workflow_rows = [
+        {
+            "Workflow": row["workflow"],
+            "Type": row["source_type"],
+            "Runs": _format_metric_number(row["runs"]),
+            "Input": _format_metric_number(row["input_tokens"]),
+            "Output": _format_metric_number(row["output_tokens"]),
+            "Total": _format_metric_number(row["total_tokens"]),
+            "Search": _format_metric_number(row["grounding_requests"]),
+            "Cost": _format_cost(row["estimated_cost_usd"]),
+        }
+        for row in by_workflow
+    ]
+    st.dataframe(workflow_rows, use_container_width=True, hide_index=True)
+
+    st.markdown("### Recent Runs")
+    st.dataframe(recent_rows, use_container_width=True, hide_index=True)
+
+
+def _build_streamlit_page(
+    page_callable: Callable[[], None],
+    title: str,
+    url_path: Optional[str] = None,
+    default: bool = False,
+    hidden: bool = False,
+):
+    """Create a Streamlit page, using hidden visibility when supported."""
+    kwargs: Dict[str, Any] = {
+        "title": title,
+        "default": default,
+    }
+    if url_path is not None:
+        kwargs["url_path"] = url_path
+    if hidden:
+        kwargs["visibility"] = "hidden"
+
+    try:
+        return st.Page(page_callable, **kwargs)
+    except TypeError:
+        # Older Streamlit builds may not support the `visibility` argument.
+        kwargs.pop("visibility", None)
+        return st.Page(page_callable, **kwargs)
+
+
 # ---------------------------------------------------------------------------
 # PalomoGPT mode
 # ---------------------------------------------------------------------------
@@ -3971,6 +4702,16 @@ def _render_palomo_gpt(api_key: str, incoming_query: Optional[str] = None) -> No
             st.markdown(fu["answer"])
         msgs.append({"role": "assistant", "content": fu["answer"]})
         _save_message(conv_id, "assistant", fu["answer"])
+
+    _persist_usage_run_safe(
+        run_id=_new_usage_run_id("palomo"),
+        source_type="conversation",
+        source_id=conv_id,
+        workflow="palomo_gpt",
+        title=_auto_title(incoming_query),
+        subject=incoming_query,
+        metrics=workflow_metrics,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -4148,6 +4889,13 @@ def _run_match_pipeline(
     """Run (or resume) the match preparation research pipeline."""
     home_team = config["home_team"]
     away_team = config["away_team"]
+    baseline_step_count = _workflow_step_count(
+        partial_results.get("workflow_metrics") if isinstance(partial_results, dict) else None
+    )
+    match_title = f"{home_team} vs {away_team}"
+    match_subject = " · ".join(
+        [part for part in [config.get("tournament", ""), config.get("match_type", ""), config.get("stadium", "")] if part]
+    )
 
     label = "🔄 Continuando análisis..." if partial_results else "🔍 Preparando informe del partido..."
     with st.status(label, expanded=True) as status:
@@ -4178,7 +4926,16 @@ def _run_match_pipeline(
 
             # Auto-save to Supabase
             try:
-                _save_match_prep(config, results)
+                saved_id = _save_match_prep(config, results)
+                _persist_usage_run_safe(
+                    run_id=_new_usage_run_id("match-prep"),
+                    source_type="match_prep",
+                    source_id=saved_id,
+                    workflow="match_preparation",
+                    title=match_title,
+                    subject=match_subject or match_title,
+                    metrics=_slice_workflow_metrics(results.get("workflow_metrics"), baseline_step_count),
+                )
             except Exception as e:
                 print(f"[MatchPrep] Error saving to Supabase: {e}")
         except Exception as e:
@@ -4187,7 +4944,19 @@ def _run_match_pipeline(
                 st.session_state.match_results = partial_results
                 # Also persist partial results to Supabase
                 try:
-                    _save_match_prep(config, partial_results)
+                    saved_id = _save_match_prep(config, partial_results)
+                    _persist_usage_run_safe(
+                        run_id=_new_usage_run_id("match-prep"),
+                        source_type="match_prep",
+                        source_id=saved_id,
+                        workflow="match_preparation",
+                        title=match_title,
+                        subject=match_subject or match_title,
+                        metrics=_slice_workflow_metrics(
+                            partial_results.get("workflow_metrics"),
+                            baseline_step_count,
+                        ),
+                    )
                 except Exception:
                     pass
             status.update(label=f"❌ Error: {e} — puedes continuar el análisis", state="error")
@@ -4273,11 +5042,21 @@ def _display_match_results(config: dict, results: dict) -> None:
             pdf_ok = False
             with st.status("📄 Sintetizando y generando PDF...", expanded=True) as pdf_status:
                 try:
-                    pdf_bytes = generate_match_pdf(
+                    pdf_bytes, pdf_metrics = generate_match_pdf(
                         config, results, api_key=api_key,
                         progress_cb=lambda msg: pdf_status.write(msg),
                     )
                     st.session_state.match_pdf_bytes = pdf_bytes
+                    _persist_usage_run_safe(
+                        run_id=_new_usage_run_id("match-pdf"),
+                        source_type="match_pdf_export",
+                        source_id=str(st.session_state.get("match_prep_id", "") or ""),
+                        workflow="match_pdf_export",
+                        title=f"{home} vs {away}",
+                        subject=pdf_filename,
+                        metrics=pdf_metrics,
+                        allow_empty=True,
+                    )
                     pdf_status.update(label="✅ PDF generado", state="complete", expanded=False)
                     pdf_ok = True
                 except Exception as e:
@@ -4449,6 +5228,9 @@ def _run_team_research_pipeline(
 ) -> None:
     """Run (or resume) the team research pipeline."""
     team_name = config["team_name"]
+    baseline_step_count = _workflow_step_count(
+        partial_results.get("workflow_metrics") if isinstance(partial_results, dict) else None
+    )
     label = "🔄 Continuando análisis..." if partial_results else "🔍 Investigando equipo..."
     with st.status(label, expanded=True) as status:
         def _progress(msg: str) -> None:
@@ -4466,14 +5248,35 @@ def _run_team_research_pipeline(
             status.update(label="✅ ¡Investigación completa!", state="complete", expanded=False)
 
             try:
-                _save_team_research(config, results)
+                saved_id = _save_team_research(config, results)
+                _persist_usage_run_safe(
+                    run_id=_new_usage_run_id("team-research"),
+                    source_type="team_research",
+                    source_id=saved_id,
+                    workflow="team_research",
+                    title=team_name,
+                    subject=config.get("tournament", "") or team_name,
+                    metrics=_slice_workflow_metrics(results.get("workflow_metrics"), baseline_step_count),
+                )
             except Exception as e:
                 print(f"[TeamResearch] Error saving to Supabase: {e}")
         except Exception as e:
             if partial_results:
                 st.session_state.team_research_results = partial_results
                 try:
-                    _save_team_research(config, partial_results)
+                    saved_id = _save_team_research(config, partial_results)
+                    _persist_usage_run_safe(
+                        run_id=_new_usage_run_id("team-research"),
+                        source_type="team_research",
+                        source_id=saved_id,
+                        workflow="team_research",
+                        title=team_name,
+                        subject=config.get("tournament", "") or team_name,
+                        metrics=_slice_workflow_metrics(
+                            partial_results.get("workflow_metrics"),
+                            baseline_step_count,
+                        ),
+                    )
                 except Exception:
                     pass
             status.update(label=f"❌ Error: {e} — puedes continuar el análisis", state="error")
@@ -4596,6 +5399,9 @@ def _run_player_research_pipeline(
     player_name = config["player_name"]
     team_name = config.get("team_name", "")
     position = config.get("position", "")
+    baseline_step_count = _workflow_step_count(
+        partial_results.get("workflow_metrics") if isinstance(partial_results, dict) else None
+    )
 
     label = "🔄 Continuando investigación..." if partial_results else "🔍 Investigando jugador..."
     with st.status(label, expanded=True) as status:
@@ -4615,14 +5421,35 @@ def _run_player_research_pipeline(
             status.update(label="✅ ¡Dossier completo!", state="complete", expanded=False)
 
             try:
-                _save_player_research(config, results)
+                saved_id = _save_player_research(config, results)
+                _persist_usage_run_safe(
+                    run_id=_new_usage_run_id("player-research"),
+                    source_type="player_research",
+                    source_id=saved_id,
+                    workflow="player_research",
+                    title=player_name,
+                    subject=" · ".join([part for part in [team_name, position] if part]) or player_name,
+                    metrics=_slice_workflow_metrics(results.get("workflow_metrics"), baseline_step_count),
+                )
             except Exception as e:
                 print(f"[PlayerResearch] Error saving to Supabase: {e}")
         except Exception as e:
             if partial_results:
                 st.session_state.player_research_results = partial_results
                 try:
-                    _save_player_research(config, partial_results)
+                    saved_id = _save_player_research(config, partial_results)
+                    _persist_usage_run_safe(
+                        run_id=_new_usage_run_id("player-research"),
+                        source_type="player_research",
+                        source_id=saved_id,
+                        workflow="player_research",
+                        title=player_name,
+                        subject=" · ".join([part for part in [team_name, position] if part]) or player_name,
+                        metrics=_slice_workflow_metrics(
+                            partial_results.get("workflow_metrics"),
+                            baseline_step_count,
+                        ),
+                    )
                 except Exception:
                     pass
             status.update(label=f"❌ Error: {e}", state="error")
@@ -4754,6 +5581,9 @@ def _render_sel_team_tab(api_key: str) -> None:
 
 
 def _run_sel_team_pipeline(config: dict, api_key: str, partial_results: Optional[Dict[str, Any]] = None) -> None:
+    baseline_step_count = _workflow_step_count(
+        partial_results.get("workflow_metrics") if isinstance(partial_results, dict) else None
+    )
     label = "🔄 Continuando..." if partial_results else "🔍 Investigando selección..."
     with st.status(label, expanded=True) as status:
         def _progress(msg: str) -> None:
@@ -4769,14 +5599,35 @@ def _run_sel_team_pipeline(config: dict, api_key: str, partial_results: Optional
             st.session_state.nat_team_research_results = results
             status.update(label="✅ ¡Investigación completa!", state="complete", expanded=False)
             try:
-                _save_national_team_research(config, results)
+                saved_id = _save_national_team_research(config, results)
+                _persist_usage_run_safe(
+                    run_id=_new_usage_run_id("nat-team"),
+                    source_type="national_team_research",
+                    source_id=saved_id,
+                    workflow="national_team_research",
+                    title=str(config.get("country", "") or "Selección"),
+                    subject=str(config.get("confederation", "") or config.get("country", "")),
+                    metrics=_slice_workflow_metrics(results.get("workflow_metrics"), baseline_step_count),
+                )
             except Exception as e:
                 print(f"[Sel] Error saving national team: {e}")
         except Exception as e:
             if partial_results:
                 st.session_state.nat_team_research_results = partial_results
                 try:
-                    _save_national_team_research(config, partial_results)
+                    saved_id = _save_national_team_research(config, partial_results)
+                    _persist_usage_run_safe(
+                        run_id=_new_usage_run_id("nat-team"),
+                        source_type="national_team_research",
+                        source_id=saved_id,
+                        workflow="national_team_research",
+                        title=str(config.get("country", "") or "Selección"),
+                        subject=str(config.get("confederation", "") or config.get("country", "")),
+                        metrics=_slice_workflow_metrics(
+                            partial_results.get("workflow_metrics"),
+                            baseline_step_count,
+                        ),
+                    )
                 except Exception:
                     pass
             status.update(label=f"❌ Error: {e}", state="error")
@@ -4877,6 +5728,10 @@ def _render_sel_match_tab(api_key: str) -> None:
 
 
 def _run_sel_match_pipeline(config: dict, api_key: str, partial_results: Optional[Dict[str, Any]] = None) -> None:
+    baseline_step_count = _workflow_step_count(
+        partial_results.get("workflow_metrics") if isinstance(partial_results, dict) else None
+    )
+    title = f"{config.get('home_country', '?')} vs {config.get('away_country', '?')}"
     label = "🔄 Continuando..." if partial_results else "🔍 Preparando partido..."
     with st.status(label, expanded=True) as status:
         def _progress(msg: str) -> None:
@@ -4894,14 +5749,39 @@ def _run_sel_match_pipeline(config: dict, api_key: str, partial_results: Optiona
             st.session_state.nat_match_results = results
             status.update(label="✅ ¡Partido preparado!", state="complete", expanded=False)
             try:
-                _save_national_match_prep(config, results)
+                saved_id = _save_national_match_prep(config, results)
+                _persist_usage_run_safe(
+                    run_id=_new_usage_run_id("nat-match"),
+                    source_type="national_match_prep",
+                    source_id=saved_id,
+                    workflow="national_match_prep",
+                    title=title,
+                    subject=" · ".join(
+                        [part for part in [config.get("tournament", ""), config.get("match_type", "")] if part]
+                    ) or title,
+                    metrics=_slice_workflow_metrics(results.get("workflow_metrics"), baseline_step_count),
+                )
             except Exception as e:
                 print(f"[Sel] Error saving nat match: {e}")
         except Exception as e:
             if partial_results:
                 st.session_state.nat_match_results = partial_results
                 try:
-                    _save_national_match_prep(config, partial_results)
+                    saved_id = _save_national_match_prep(config, partial_results)
+                    _persist_usage_run_safe(
+                        run_id=_new_usage_run_id("nat-match"),
+                        source_type="national_match_prep",
+                        source_id=saved_id,
+                        workflow="national_match_prep",
+                        title=title,
+                        subject=" · ".join(
+                            [part for part in [config.get("tournament", ""), config.get("match_type", "")] if part]
+                        ) or title,
+                        metrics=_slice_workflow_metrics(
+                            partial_results.get("workflow_metrics"),
+                            baseline_step_count,
+                        ),
+                    )
                 except Exception:
                     pass
             status.update(label=f"❌ Error: {e}", state="error")
@@ -4995,6 +5875,9 @@ def _render_sel_player_tab(api_key: str) -> None:
 
 
 def _run_sel_player_pipeline(config: dict, api_key: str, partial_results: Optional[Dict[str, Any]] = None) -> None:
+    baseline_step_count = _workflow_step_count(
+        partial_results.get("workflow_metrics") if isinstance(partial_results, dict) else None
+    )
     label = "🔄 Continuando..." if partial_results else "🔍 Investigando convocado..."
     with st.status(label, expanded=True) as status:
         def _progress(msg: str) -> None:
@@ -5010,14 +5893,35 @@ def _run_sel_player_pipeline(config: dict, api_key: str, partial_results: Option
             st.session_state.nat_player_results = results
             status.update(label="✅ ¡Dossier completo!", state="complete", expanded=False)
             try:
-                _save_national_player_research(config, results)
+                saved_id = _save_national_player_research(config, results)
+                _persist_usage_run_safe(
+                    run_id=_new_usage_run_id("nat-player"),
+                    source_type="national_player_research",
+                    source_id=saved_id,
+                    workflow="national_player_research",
+                    title=str(config.get("player_name", "") or "Convocado"),
+                    subject=str(config.get("country", "") or config.get("player_name", "")),
+                    metrics=_slice_workflow_metrics(results.get("workflow_metrics"), baseline_step_count),
+                )
             except Exception as e:
                 print(f"[Sel] Error saving nat player: {e}")
         except Exception as e:
             if partial_results:
                 st.session_state.nat_player_results = partial_results
                 try:
-                    _save_national_player_research(config, partial_results)
+                    saved_id = _save_national_player_research(config, partial_results)
+                    _persist_usage_run_safe(
+                        run_id=_new_usage_run_id("nat-player"),
+                        source_type="national_player_research",
+                        source_id=saved_id,
+                        workflow="national_player_research",
+                        title=str(config.get("player_name", "") or "Convocado"),
+                        subject=str(config.get("country", "") or config.get("player_name", "")),
+                        metrics=_slice_workflow_metrics(
+                            partial_results.get("workflow_metrics"),
+                            baseline_step_count,
+                        ),
+                    )
                 except Exception:
                     pass
             status.update(label=f"❌ Error: {e}", state="error")
@@ -5131,6 +6035,40 @@ def _render_seleccion(api_key: str) -> None:
         _render_sel_team_tab(api_key)
     elif selected_tab == TAB_JUGADOR:
         _render_sel_player_tab(api_key)
+
+
+def main() -> None:
+    """Configure the app shell and route between the root app and hidden dashboard."""
+    st.set_page_config(
+        page_title="PalomoFacts · Football Intelligence",
+        page_icon="⚽",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
+    st.markdown(_CUSTOM_CSS, unsafe_allow_html=True)
+
+    if not hasattr(st, "Page") or not hasattr(st, "navigation"):
+        st.warning(
+            "This build of Streamlit does not support `st.Page` / `st.navigation`, "
+            "so `/dashboard` routing will require a Streamlit upgrade."
+        )
+        _render_root_page()
+        return
+
+    root_page = _build_streamlit_page(
+        _render_root_page,
+        title="PalomoFacts",
+        default=True,
+    )
+    dashboard_page = _build_streamlit_page(
+        _render_dashboard_page,
+        title="Usage Dashboard",
+        url_path="dashboard",
+        hidden=True,
+    )
+
+    navigation = st.navigation([root_page, dashboard_page], position="hidden")
+    navigation.run()
 
 
 if __name__ == "__main__":
