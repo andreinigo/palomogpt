@@ -261,6 +261,296 @@ def _auto_title(text: str) -> str:
     return clean[:60] + "…" if len(clean) > 60 else clean
 
 
+def _empty_token_usage(model: str = "", provider: str = "") -> Dict[str, Any]:
+    """Return a normalized empty token usage payload."""
+    return {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "grounding_requests": 0,
+        "model": model,
+        "provider": provider,
+    }
+
+
+def _normalize_token_usage(tokens: Any) -> Dict[str, Any]:
+    """Normalize token usage payloads so old and new runs share one shape."""
+    normalized = _empty_token_usage()
+    if not isinstance(tokens, dict):
+        return normalized
+
+    normalized["input_tokens"] = int(tokens.get("input_tokens", 0) or 0)
+    normalized["output_tokens"] = int(tokens.get("output_tokens", 0) or 0)
+    normalized["total_tokens"] = int(tokens.get("total_tokens", 0) or 0)
+    normalized["grounding_requests"] = int(tokens.get("grounding_requests", 0) or 0)
+    normalized["model"] = str(tokens.get("model", "") or "")
+    normalized["provider"] = str(tokens.get("provider", "") or "")
+
+    if not normalized["total_tokens"]:
+        normalized["total_tokens"] = normalized["input_tokens"] + normalized["output_tokens"]
+
+    return normalized
+
+
+def _add_token_usage(total: Dict[str, Any], tokens: Any) -> Dict[str, Any]:
+    """Accumulate a normalized token payload into a running total."""
+    usage = _normalize_token_usage(tokens)
+    total["input_tokens"] = int(total.get("input_tokens", 0) or 0) + usage["input_tokens"]
+    total["output_tokens"] = int(total.get("output_tokens", 0) or 0) + usage["output_tokens"]
+    total["total_tokens"] = int(total.get("total_tokens", 0) or 0) + usage["total_tokens"]
+    total["grounding_requests"] = int(total.get("grounding_requests", 0) or 0) + usage["grounding_requests"]
+    if usage.get("model") and not total.get("model"):
+        total["model"] = usage["model"]
+    if usage.get("provider") and not total.get("provider"):
+        total["provider"] = usage["provider"]
+    return total
+
+
+def _init_workflow_metrics(workflow: str, existing: Any = None) -> Dict[str, Any]:
+    """Return a workflow metrics container with recomputed totals."""
+    metrics = existing if isinstance(existing, dict) else {}
+    steps = metrics.get("steps", [])
+    if not isinstance(steps, list):
+        steps = []
+
+    totals = _empty_token_usage()
+    if steps:
+        for step in steps:
+            _add_token_usage(totals, step)
+    else:
+        totals = _normalize_token_usage(metrics.get("totals"))
+
+    return {
+        "workflow": str(metrics.get("workflow") or workflow),
+        "steps": steps,
+        "totals": totals,
+    }
+
+
+def _ensure_workflow_metrics(results: Dict[str, Any], workflow: str) -> Dict[str, Any]:
+    """Attach workflow metrics to a results dict if missing."""
+    metrics = _init_workflow_metrics(workflow, results.get("workflow_metrics"))
+    results["workflow_metrics"] = metrics
+    return metrics
+
+
+def _record_workflow_step(
+    metrics: Dict[str, Any],
+    step: str,
+    label: str,
+    tokens: Any,
+    entity: str = "",
+) -> None:
+    """Append one measured step to the workflow metrics payload."""
+    usage = _normalize_token_usage(tokens)
+    entry: Dict[str, Any] = {
+        "step": step,
+        "label": label,
+        **usage,
+    }
+    if entity:
+        entry["entity"] = entity
+
+    metrics.setdefault("steps", []).append(entry)
+    _add_token_usage(metrics.setdefault("totals", _empty_token_usage()), usage)
+
+
+def _merge_workflow_metrics(target: Dict[str, Any], incoming: Any) -> Dict[str, Any]:
+    """Merge another workflow metrics payload into the target tracker."""
+    source = _init_workflow_metrics(target.get("workflow", "workflow"), incoming)
+    for step in source.get("steps", []):
+        if isinstance(step, dict):
+            target.setdefault("steps", []).append(dict(step))
+            _add_token_usage(target.setdefault("totals", _empty_token_usage()), step)
+    return target
+
+
+def _serialize_result_value(value: Any) -> Any:
+    """Serialize tuples and nested token payloads for Supabase JSON storage."""
+    if isinstance(value, tuple):
+        text = value[0] if len(value) > 0 else ""
+        sources = value[1] if len(value) > 1 else []
+        payload = {
+            "text": text,
+            "sources": sources,
+            "tokens": _normalize_token_usage(value[2] if len(value) > 2 else None),
+        }
+        return payload
+
+    if isinstance(value, list):
+        serialized: List[Any] = []
+        for item in value:
+            if isinstance(item, dict):
+                normalized_item = dict(item)
+                if "tokens" in normalized_item or "text" in normalized_item:
+                    normalized_item["tokens"] = _normalize_token_usage(normalized_item.get("tokens"))
+                serialized.append(normalized_item)
+            else:
+                serialized.append(item)
+        return serialized
+
+    return value
+
+
+def _deserialize_text_result(value: Any) -> Tuple[str, List[Dict[str, str]], Dict[str, Any]]:
+    """Load a persisted text result while staying compatible with older rows."""
+    if isinstance(value, dict) and "text" in value:
+        return (
+            value.get("text", ""),
+            value.get("sources", []),
+            _normalize_token_usage(value.get("tokens")),
+        )
+
+    if isinstance(value, tuple):
+        text = value[0] if len(value) > 0 else ""
+        sources = value[1] if len(value) > 1 else []
+        tokens = _normalize_token_usage(value[2] if len(value) > 2 else None)
+        return text, sources, tokens
+
+    return "", [], _empty_token_usage()
+
+
+def _normalize_roster_entries(value: Any) -> List[Dict[str, Any]]:
+    """Normalize roster entries so player token payloads are always present."""
+    if not isinstance(value, list):
+        return []
+
+    normalized: List[Dict[str, Any]] = []
+    for item in value:
+        if isinstance(item, dict):
+            row = dict(item)
+            row["tokens"] = _normalize_token_usage(row.get("tokens"))
+            normalized.append(row)
+    return normalized
+
+
+def _unpack_text_result(value: Any) -> Tuple[str, List[Dict[str, str]], Dict[str, Any]]:
+    """Unpack either in-memory tuples or persisted dict payloads."""
+    return _deserialize_text_result(value)
+
+
+def _aggregate_workflow_metrics(metrics: Any) -> List[Dict[str, Any]]:
+    """Roll up raw call telemetry by workflow step for easier analysis."""
+    normalized = _init_workflow_metrics("workflow", metrics)
+    aggregated: Dict[str, Dict[str, Any]] = {}
+
+    for step in normalized.get("steps", []):
+        if not isinstance(step, dict):
+            continue
+        step_key = str(step.get("step") or step.get("label") or "workflow.step")
+        label = str(step.get("label") or step_key)
+        row = aggregated.setdefault(
+            step_key,
+            {
+                "step": step_key,
+                "label": label,
+                "calls": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+                "grounding_requests": 0,
+                "models": [],
+                "examples": [],
+            },
+        )
+        row["calls"] += 1
+        row["input_tokens"] += int(step.get("input_tokens", 0) or 0)
+        row["output_tokens"] += int(step.get("output_tokens", 0) or 0)
+        row["total_tokens"] += int(step.get("total_tokens", 0) or 0)
+        row["grounding_requests"] += int(step.get("grounding_requests", 0) or 0)
+
+        model = str(step.get("model", "") or "")
+        if model and model not in row["models"]:
+            row["models"].append(model)
+
+        entity = str(step.get("entity", "") or "")
+        if entity and entity not in row["examples"] and len(row["examples"]) < 3:
+            row["examples"].append(entity)
+
+    return sorted(aggregated.values(), key=lambda item: item["total_tokens"], reverse=True)
+
+
+def _format_metric_number(value: Any) -> str:
+    """Pretty-print integer metrics in the UI."""
+    return f"{int(value or 0):,}"
+
+
+def _build_markdown_table(headers: List[str], rows: List[List[str]]) -> str:
+    """Render a lightweight markdown table without extra dependencies."""
+    if not rows:
+        return ""
+
+    lines = [
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join(["---"] * len(headers)) + " |",
+    ]
+    for row in rows:
+        lines.append("| " + " | ".join(row) + " |")
+    return "\n".join(lines)
+
+
+def _render_workflow_metrics(metrics: Any, title: str = "📈 Uso de tokens") -> None:
+    """Render workflow totals, per-step rollups, and top expensive calls."""
+    normalized = _init_workflow_metrics("workflow", metrics)
+    steps = normalized.get("steps", [])
+    if not steps:
+        return
+
+    totals = normalized.get("totals", _empty_token_usage())
+    grouped_rows = _aggregate_workflow_metrics(normalized)
+    top_calls = sorted(
+        [step for step in steps if isinstance(step, dict)],
+        key=lambda item: int(item.get("total_tokens", 0) or 0),
+        reverse=True,
+    )[:5]
+
+    with st.expander(title, expanded=False):
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Input", _format_metric_number(totals.get("input_tokens")))
+        col2.metric("Output", _format_metric_number(totals.get("output_tokens")))
+        col3.metric("Total", _format_metric_number(totals.get("total_tokens")))
+        col4.metric("Search", _format_metric_number(totals.get("grounding_requests")))
+
+        if grouped_rows:
+            st.markdown("**Por paso**")
+            grouped_table = _build_markdown_table(
+                ["Paso", "Llamadas", "Input", "Output", "Total", "Modelo"],
+                [
+                    [
+                        row["label"],
+                        _format_metric_number(row["calls"]),
+                        _format_metric_number(row["input_tokens"]),
+                        _format_metric_number(row["output_tokens"]),
+                        _format_metric_number(row["total_tokens"]),
+                        ", ".join(row["models"]) if row["models"] else "n/a",
+                    ]
+                    for row in grouped_rows
+                ],
+            )
+            if grouped_table:
+                st.markdown(grouped_table)
+
+        if top_calls:
+            st.markdown("**Llamadas más costosas**")
+            calls_table = _build_markdown_table(
+                ["Llamada", "Total", "Modelo"],
+                [
+                    [
+                        (
+                            f"{step.get('label', step.get('step', 'Paso'))} · {step.get('entity')}"
+                            if step.get("entity")
+                            else str(step.get("label", step.get("step", "Paso")))
+                        ),
+                        _format_metric_number(step.get("total_tokens")),
+                        str(step.get("model", "") or "n/a"),
+                    ]
+                    for step in top_calls
+                ],
+            )
+            if calls_table:
+                st.markdown(calls_table)
+
+
 # --- Match Prep persistence helpers ---
 
 def _save_match_prep(config: dict, results: dict) -> str:
@@ -274,12 +564,7 @@ def _save_match_prep(config: dict, results: dict) -> str:
         # Convert results to JSON-serializable form
         json_results = {}
         for key, val in results.items():
-            if isinstance(val, tuple):
-                json_results[key] = {"text": val[0], "sources": val[1]}
-            elif isinstance(val, list):
-                json_results[key] = val
-            else:
-                json_results[key] = val
+            json_results[key] = _serialize_result_value(val)
 
         payload = {
             "title": title,
@@ -349,13 +634,13 @@ def _load_match_prep(prep_id: str) -> Optional[Dict[str, Any]]:
         raw_results = row.get("results", {})
         results = {}
         for key in ("home_history", "away_history", "palomo_phrases"):
-            val = raw_results.get(key, {})
-            if isinstance(val, dict) and "text" in val:
-                results[key] = (val["text"], val.get("sources", []))
-            else:
-                results[key] = ("", [])
+            results[key] = _deserialize_text_result(raw_results.get(key, {}))
         for key in ("home_roster", "away_roster"):
-            results[key] = raw_results.get(key, [])
+            results[key] = _normalize_roster_entries(raw_results.get(key, []))
+        results["workflow_metrics"] = _init_workflow_metrics(
+            "match_preparation",
+            raw_results.get("workflow_metrics"),
+        )
         return {"config": row.get("config", {}), "results": results}
     except Exception as e:
         print(f"[Supabase] Error loading match prep {prep_id}: {e}")
@@ -385,12 +670,7 @@ def _save_team_research(config: dict, results: dict) -> str:
         title = config.get("team_name", "?")
         json_results: dict = {}
         for key, val in results.items():
-            if isinstance(val, tuple):
-                json_results[key] = {"text": val[0], "sources": val[1]}
-            elif isinstance(val, list):
-                json_results[key] = val
-            else:
-                json_results[key] = val
+            json_results[key] = _serialize_result_value(val)
 
         payload = {
             "title": title,
@@ -454,12 +734,12 @@ def _load_team_research(research_id: str) -> Optional[Dict[str, Any]]:
         row = resp.data
         raw_results = row.get("results", {})
         results: dict = {}
-        val = raw_results.get("team_history", {})
-        if isinstance(val, dict) and "text" in val:
-            results["team_history"] = (val["text"], val.get("sources", []))
-        else:
-            results["team_history"] = ("", [])
-        results["roster"] = raw_results.get("roster", [])
+        results["team_history"] = _deserialize_text_result(raw_results.get("team_history", {}))
+        results["roster"] = _normalize_roster_entries(raw_results.get("roster", []))
+        results["workflow_metrics"] = _init_workflow_metrics(
+            "team_research",
+            raw_results.get("workflow_metrics"),
+        )
         return {"config": row.get("config", {}), "results": results}
     except Exception as e:
         print(f"[Supabase] Error loading team research {research_id}: {e}")
@@ -489,10 +769,7 @@ def _save_player_research(config: dict, results: dict) -> str:
         title = config.get("player_name", "?")
         json_results: dict = {}
         for key, val in results.items():
-            if isinstance(val, tuple):
-                json_results[key] = {"text": val[0], "sources": val[1]}
-            else:
-                json_results[key] = val
+            json_results[key] = _serialize_result_value(val)
 
         payload = {
             "title": title,
@@ -557,11 +834,11 @@ def _load_player_research(research_id: str) -> Optional[Dict[str, Any]]:
         row = resp.data
         raw_results = row.get("results", {})
         results: dict = {}
-        val = raw_results.get("dossier", {})
-        if isinstance(val, dict) and "text" in val:
-            results["dossier"] = (val["text"], val.get("sources", []))
-        else:
-            results["dossier"] = ("", [])
+        results["dossier"] = _deserialize_text_result(raw_results.get("dossier", {}))
+        results["workflow_metrics"] = _init_workflow_metrics(
+            "player_research",
+            raw_results.get("workflow_metrics"),
+        )
         return {"config": row.get("config", {}), "results": results}
     except Exception as e:
         print(f"[Supabase] Error loading player research {research_id}: {e}")
@@ -593,12 +870,7 @@ def _save_national_team_research(config: dict, results: dict) -> str:
         title = config.get("country", "?")
         json_results: dict = {}
         for key, val in results.items():
-            if isinstance(val, tuple):
-                json_results[key] = {"text": val[0], "sources": val[1]}
-            elif isinstance(val, list):
-                json_results[key] = val
-            else:
-                json_results[key] = val
+            json_results[key] = _serialize_result_value(val)
         payload = {
             "title": title,
             "country": config.get("country", ""),
@@ -658,12 +930,12 @@ def _load_national_team_research(research_id: str) -> Optional[Dict[str, Any]]:
         row = resp.data
         raw = row.get("results", {})
         results: dict = {}
-        val = raw.get("team_history", {})
-        if isinstance(val, dict) and "text" in val:
-            results["team_history"] = (val["text"], val.get("sources", []))
-        else:
-            results["team_history"] = ("", [])
-        results["roster"] = raw.get("roster", [])
+        results["team_history"] = _deserialize_text_result(raw.get("team_history", {}))
+        results["roster"] = _normalize_roster_entries(raw.get("roster", []))
+        results["workflow_metrics"] = _init_workflow_metrics(
+            "national_team_research",
+            raw.get("workflow_metrics"),
+        )
         return {"config": row.get("config", {}), "results": results}
     except Exception as e:
         print(f"[Supabase] Error loading national team research {research_id}: {e}")
@@ -694,12 +966,7 @@ def _save_national_match_prep(config: dict, results: dict) -> str:
         title = f"{home} vs {away}"
         json_results: dict = {}
         for key, val in results.items():
-            if isinstance(val, tuple):
-                json_results[key] = {"text": val[0], "sources": val[1]}
-            elif isinstance(val, list):
-                json_results[key] = val
-            else:
-                json_results[key] = val
+            json_results[key] = _serialize_result_value(val)
         payload = {
             "title": title,
             "home_country": home,
@@ -761,13 +1028,13 @@ def _load_national_match_prep(prep_id: str) -> Optional[Dict[str, Any]]:
         raw = row.get("results", {})
         results: dict = {}
         for key in ("home_history", "away_history", "palomo_phrases"):
-            val = raw.get(key, {})
-            if isinstance(val, dict) and "text" in val:
-                results[key] = (val["text"], val.get("sources", []))
-            else:
-                results[key] = ("", [])
-        results["home_roster"] = raw.get("home_roster", [])
-        results["away_roster"] = raw.get("away_roster", [])
+            results[key] = _deserialize_text_result(raw.get(key, {}))
+        results["home_roster"] = _normalize_roster_entries(raw.get("home_roster", []))
+        results["away_roster"] = _normalize_roster_entries(raw.get("away_roster", []))
+        results["workflow_metrics"] = _init_workflow_metrics(
+            "national_match_prep",
+            raw.get("workflow_metrics"),
+        )
         return {"config": row.get("config", {}), "results": results}
     except Exception as e:
         print(f"[Supabase] Error loading national match prep {prep_id}: {e}")
@@ -796,10 +1063,7 @@ def _save_national_player_research(config: dict, results: dict) -> str:
         title = config.get("player_name", "?")
         json_results: dict = {}
         for key, val in results.items():
-            if isinstance(val, tuple):
-                json_results[key] = {"text": val[0], "sources": val[1]}
-            else:
-                json_results[key] = val
+            json_results[key] = _serialize_result_value(val)
         payload = {
             "title": title,
             "player_name": config.get("player_name", ""),
@@ -859,11 +1123,11 @@ def _load_national_player_research(research_id: str) -> Optional[Dict[str, Any]]
         row = resp.data
         raw = row.get("results", {})
         results: dict = {}
-        val = raw.get("dossier", {})
-        if isinstance(val, dict) and "text" in val:
-            results["dossier"] = (val["text"], val.get("sources", []))
-        else:
-            results["dossier"] = ("", [])
+        results["dossier"] = _deserialize_text_result(raw.get("dossier", {}))
+        results["workflow_metrics"] = _init_workflow_metrics(
+            "national_player_research",
+            raw.get("workflow_metrics"),
+        )
         return {"config": row.get("config", {}), "results": results}
     except Exception as e:
         print(f"[Supabase] Error loading national player research {research_id}: {e}")
@@ -1844,11 +2108,11 @@ def _gemini_request(
     history: Optional[List[types.Content]] = None,
     timeout: int = 120,
     use_search: bool = True,
-) -> Tuple[str, List[Dict[str, str]]]:
+) -> Tuple[str, List[Dict[str, str]], Dict[str, Any]]:
     """
     Request to Gemini with optional Google Search grounding.
     Retries up to _MAX_RETRIES times with exponential backoff.
-    Returns (response_text, sources).
+    Returns (response_text, sources, token_usage).
     """
     client = genai.Client(api_key=api_key)
 
@@ -1888,6 +2152,14 @@ def _gemini_request(
             )
 
             text = response.text or ""
+            token_usage = _empty_token_usage(model=model, provider="google")
+            token_usage["grounding_requests"] = 1 if use_search else 0
+            if hasattr(response, "usage_metadata") and response.usage_metadata:
+                token_usage["input_tokens"] = int(getattr(response.usage_metadata, "prompt_token_count", 0) or 0)
+                token_usage["output_tokens"] = int(getattr(response.usage_metadata, "candidates_token_count", 0) or 0)
+                token_usage["total_tokens"] = int(getattr(response.usage_metadata, "total_token_count", 0) or 0)
+                if not token_usage["total_tokens"]:
+                    token_usage["total_tokens"] = token_usage["input_tokens"] + token_usage["output_tokens"]
 
             # Extract sources from grounding metadata
             sources: List[Dict[str, str]] = []
@@ -1907,7 +2179,7 @@ def _gemini_request(
             # Resolve inline [N] markers into clickable superscript links
             text = _resolve_inline_citations(text, sources)
 
-            return text, sources
+            return text, sources, token_usage
 
         except Exception as e:
             last_error = e
@@ -1944,11 +2216,11 @@ def _claude_request(
     system_prompt: str,
     user_message: str,
     history: Optional[list] = None,
-) -> Tuple[str, List[Dict[str, str]]]:
+) -> Tuple[str, List[Dict[str, str]], Dict[str, Any]]:
     """
     Fallback request via Claude Opus 4.6.
     No search grounding — purely LLM reasoning.
-    Returns (response_text, sources=[]).
+    Returns (response_text, sources=[], token_usage).
     """
     claude_key = st.secrets.get("ANTHROPIC_API_KEY", "")
     if not claude_key:
@@ -1984,7 +2256,12 @@ def _claude_request(
             text += block.text
 
     print(f"[Claude] Response received ({len(text)} chars)")
-    return text, []  # no grounding sources from Claude
+    token_usage = _empty_token_usage(model=CLAUDE_MODEL, provider="anthropic")
+    if hasattr(response, "usage") and response.usage:
+        token_usage["input_tokens"] = int(getattr(response.usage, "input_tokens", 0) or 0)
+        token_usage["output_tokens"] = int(getattr(response.usage, "output_tokens", 0) or 0)
+        token_usage["total_tokens"] = token_usage["input_tokens"] + token_usage["output_tokens"]
+    return text, [], token_usage  # no grounding sources from Claude
 
 
 # ---------------------------------------------------------------------------
@@ -1994,9 +2271,9 @@ def get_palomo_response(
     query: str,
     session_messages: list[dict],
     api_key: str,
-) -> Tuple[str, List[Dict[str, str]], List[str], List[Dict[str, str]]]:
+) -> Tuple[str, List[Dict[str, str]], List[str], List[Dict[str, str]], Dict[str, Any]]:
     """Get a response from PalomoGPT with Google Search grounding + follow-up chain.
-    Returns (response_text, sources, reasoning_chain, followups).
+    Returns (response_text, sources, reasoning_chain, followups, workflow_metrics).
     """
     # Build conversation history for Gemini
     history: List[types.Content] = []
@@ -2012,13 +2289,21 @@ def get_palomo_response(
             )
 
     reasoning: List[str] = []
+    workflow_metrics = _init_workflow_metrics("palomo_gpt")
 
     # Single pass: Gemini + Google Search grounding
-    text, sources = _gemini_request(
+    text, sources, tokens_main = _gemini_request(
         api_key=api_key,
         system_prompt=_PALOMO_GPT_SYSTEM,
         user_message=query,
         history=history if history else None,
+    )
+    _record_workflow_step(
+        workflow_metrics,
+        "palomo.main_answer",
+        "Respuesta principal",
+        tokens_main,
+        entity=query[:80],
     )
 
     source_titles = [s.get("title", "?") for s in sources[:10]]
@@ -2034,7 +2319,7 @@ def get_palomo_response(
     for i in range(2):
         try:
             # Generate a follow-up question
-            followup_q, _ = _gemini_request(
+            followup_q, _, tokens_fq = _gemini_request(
                 api_key=api_key,
                 system_prompt=_FOLLOW_UP_SYSTEM,
                 user_message=(
@@ -2042,6 +2327,13 @@ def get_palomo_response(
                     f"RESPUESTA RECIBIDA:\n{current_answer}"
                 ),
                 use_search=False,
+            )
+            _record_workflow_step(
+                workflow_metrics,
+                "palomo.followup_question",
+                "Pregunta de seguimiento",
+                tokens_fq,
+                entity=f"Ronda {i + 1}",
             )
             followup_q = followup_q.strip()
             if not followup_q or len(followup_q) < 10:
@@ -2052,7 +2344,7 @@ def get_palomo_response(
             )
 
             # Answer the follow-up question with search
-            followup_a, extra_sources = _gemini_request(
+            followup_a, extra_sources, tokens_fa = _gemini_request(
                 api_key=api_key,
                 system_prompt=_PALOMO_GPT_SYSTEM,
                 user_message=followup_q,
@@ -2060,6 +2352,13 @@ def get_palomo_response(
                     types.Content(role="user", parts=[types.Part.from_text(text=query)]),
                     types.Content(role="model", parts=[types.Part.from_text(text=current_answer)]),
                 ],
+            )
+            _record_workflow_step(
+                workflow_metrics,
+                "palomo.followup_answer",
+                "Respuesta de seguimiento",
+                tokens_fa,
+                entity=followup_q[:80],
             )
 
             followups.append({"question": followup_q, "answer": followup_a})
@@ -2077,7 +2376,7 @@ def get_palomo_response(
             reasoning.append(f"⚠️ **Follow-up {i+1} omitido:** `{e}`")
             break
 
-    return text, sources, reasoning, followups
+    return text, sources, reasoning, followups, workflow_metrics
 
 
 # ---------------------------------------------------------------------------
@@ -2086,7 +2385,7 @@ def get_palomo_response(
 def _research_team_history(
     team_name: str,
     api_key: str,
-) -> Tuple[str, List[Dict[str, str]]]:
+) -> Tuple[str, List[Dict[str, str]], Dict[str, Any]]:
     """Research a team's last 2 seasons history."""
     season_prev = CURRENT_YEAR - 2
     season_curr = CURRENT_YEAR - 1
@@ -2115,7 +2414,7 @@ def _research_team_history(
 def _fetch_player_list(
     team_name: str,
     api_key: str,
-) -> List[Dict[str, Any]]:
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """Fetch the roster as a list of {name, full_name, position, number} dicts."""
     season_curr = CURRENT_YEAR - 1
     season_next = CURRENT_YEAR
@@ -2127,7 +2426,7 @@ def _fetch_player_list(
         current_date=CURRENT_DATE,
     )
 
-    text, _ = _gemini_request(
+    text, _, tokens = _gemini_request(
         api_key=api_key,
         system_prompt=prompt,
         user_message=(
@@ -2148,7 +2447,7 @@ def _fetch_player_list(
     players = data.get("players", [])
     if not players:
         raise RuntimeError(f"Empty player list returned for {team_name}")
-    return players
+    return players, tokens
 
 
 _POS_LABELS = {"GK": "🧤 Portero", "DEF": "🛡️ Defensa", "MID": "🎯 Centrocampista", "FWD": "⚡ Delantero"}
@@ -2173,7 +2472,7 @@ def _research_single_player(
         current_date=CURRENT_DATE,
     )
 
-    text, sources = _gemini_request(
+    text, sources, tokens = _gemini_request(
         api_key=api_key,
         system_prompt=prompt,
         user_message=(
@@ -2191,6 +2490,7 @@ def _research_single_player(
         "number": player.get("number", ""),
         "text": text,
         "sources": sources,
+        "tokens": tokens,
     }
 
 
@@ -2199,6 +2499,8 @@ def _research_team_roster(
     opponent_name: str,
     api_key: str,
     progress_cb: Optional[Callable[[str], None]] = None,
+    workflow_metrics: Optional[Dict[str, Any]] = None,
+    step_prefix: str = "roster",
 ) -> List[Dict[str, Any]]:
     """
     Research a team's roster player-by-player.
@@ -2208,7 +2510,14 @@ def _research_team_roster(
     """
     if progress_cb:
         progress_cb(f"📋 Obteniendo lista de jugadores de **{team_name}**...")
-    players = _fetch_player_list(team_name, api_key)
+    players, list_tokens = _fetch_player_list(team_name, api_key)
+    if workflow_metrics is not None:
+        _record_workflow_step(
+            workflow_metrics,
+            f"{step_prefix}.fetch_player_list",
+            f"{team_name}: lista de jugadores",
+            list_tokens,
+        )
     total = len(players)
     if progress_cb:
         progress_cb(f"✅ {total} jugadores encontrados en **{team_name}**. Investigando uno por uno...")
@@ -2239,7 +2548,16 @@ def _research_team_roster(
                         "number": p.get("number", ""),
                         "text": f"❌ Error investigando: {e}",
                         "sources": [],
+                        "tokens": _empty_token_usage(),
                     }
+                if workflow_metrics is not None:
+                    _record_workflow_step(
+                        workflow_metrics,
+                        f"{step_prefix}.player_dossier",
+                        f"{team_name}: dossier de jugador",
+                        results[idx].get("tokens"),
+                        entity=str(results[idx].get("name", "?")),
+                    )
                 completed += 1
                 if progress_cb:
                     pname = results[idx]["name"]
@@ -2257,7 +2575,7 @@ def _research_palomo_phrases(
     home_context: str,
     away_context: str,
     api_key: str,
-) -> Tuple[str, List[Dict[str, str]]]:
+) -> Tuple[str, List[Dict[str, str]], Dict[str, Any]]:
     """Generate Fernando Palomo–style phrases for the match."""
     # Truncate context to stay within token limits
     max_ctx = 4000
@@ -2312,6 +2630,9 @@ def _retry_failed_roster_players(
     opponent_name: str,
     api_key: str,
     progress_cb: Optional[Callable[[str], None]] = None,
+    research_fn: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+    workflow_metrics: Optional[Dict[str, Any]] = None,
+    step_prefix: str = "roster",
 ) -> List[Dict[str, Any]]:
     """Re-research only the players that have error text in their dossier."""
     _cb = progress_cb or (lambda _msg: None)
@@ -2324,6 +2645,12 @@ def _retry_failed_roster_players(
 
     total_failed = len(failed_indices)
     _cb(f"🔄 Re-investigando **{total_failed}** jugadores fallidos de **{team_name}**...")
+    player_fetch = research_fn
+    if player_fetch is None:
+        if opponent_name:
+            player_fetch = lambda player: _research_single_player(player, team_name, opponent_name, api_key)
+        else:
+            player_fetch = lambda player: _research_single_player_solo(player, team_name, api_key)
 
     batch_size = 4
     completed = 0
@@ -2331,13 +2658,7 @@ def _retry_failed_roster_players(
         batch_idxs = failed_indices[batch_start : batch_start + batch_size]
         with ThreadPoolExecutor(max_workers=batch_size) as executor:
             future_to_idx = {
-                executor.submit(
-                    _research_single_player,
-                    roster[idx],  # use existing player info (name, position, number)
-                    team_name,
-                    opponent_name,
-                    api_key,
-                ): idx
+                executor.submit(player_fetch, roster[idx]): idx
                 for idx in batch_idxs
             }
             for future in as_completed(future_to_idx):
@@ -2347,6 +2668,15 @@ def _retry_failed_roster_players(
                 except Exception as e:
                     # Keep the error but update it
                     roster[idx]["text"] = f"❌ Error investigando: {e}"
+                    roster[idx]["tokens"] = _empty_token_usage()
+                if workflow_metrics is not None:
+                    _record_workflow_step(
+                        workflow_metrics,
+                        f"{step_prefix}.player_dossier",
+                        f"{team_name}: dossier de jugador",
+                        roster[idx].get("tokens"),
+                        entity=str(roster[idx].get("name", "?")),
+                    )
                 completed += 1
                 pname = roster[idx].get("name", "?")
                 _cb(f"🔄 [{completed}/{total_failed}] **{pname}** ✓  ({team_name})")
@@ -2363,6 +2693,7 @@ def run_match_preparation(
     api_key: str,
     progress_cb: Optional[Callable[[str], None]] = None,
     partial_results: Optional[Dict[str, Any]] = None,
+    initial_metrics: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Run the full match preparation pipeline with **resumability**.
@@ -2385,6 +2716,9 @@ def run_match_preparation(
         "away_roster": [],
         "palomo_phrases": ("", []),
     }
+    workflow_metrics = _ensure_workflow_metrics(results, "match_preparation")
+    if initial_metrics:
+        _merge_workflow_metrics(workflow_metrics, initial_metrics)
 
     # Phase 1: team histories in parallel (skip if already done)
     need_home_hist = not _has_data(results.get("home_history"))
@@ -2401,8 +2735,16 @@ def run_match_preparation(
                 key = futures[future]
                 try:
                     results[key] = future.result()
+                    label = home_team if key == "home_history" else away_team
+                    _, _, tokens = _unpack_text_result(results[key])
+                    _record_workflow_step(
+                        workflow_metrics,
+                        f"match_prep.{key}",
+                        f"{label}: historial",
+                        tokens,
+                    )
                 except Exception as e:
-                    results[key] = (f"❌ Error investigando: {e}", [])
+                    results[key] = (f"❌ Error investigando: {e}", [], _empty_token_usage())
         _cb("✅ Historiales completados.")
     else:
         _cb("✅ Historiales ya disponibles — reutilizando.")
@@ -2412,14 +2754,25 @@ def run_match_preparation(
         _cb(f"👥 Investigando plantilla de **{home_team}** jugador por jugador...")
         try:
             results["home_roster"] = _research_team_roster(
-                home_team, away_team, api_key, progress_cb=_cb,
+                home_team,
+                away_team,
+                api_key,
+                progress_cb=_cb,
+                workflow_metrics=workflow_metrics,
+                step_prefix="match_prep.home_roster",
             )
         except Exception as e:
             results["home_roster"] = []
             _cb(f"❌ Error con plantilla de {home_team}: {e}")
     elif _roster_has_failures(results.get("home_roster", [])):
         results["home_roster"] = _retry_failed_roster_players(
-            results["home_roster"], home_team, away_team, api_key, progress_cb=_cb,
+            results["home_roster"],
+            home_team,
+            away_team,
+            api_key,
+            progress_cb=_cb,
+            workflow_metrics=workflow_metrics,
+            step_prefix="match_prep.home_roster",
         )
     else:
         _cb(f"✅ Plantilla de **{home_team}** ya disponible — reutilizando.")
@@ -2428,14 +2781,25 @@ def run_match_preparation(
         _cb(f"👥 Investigando plantilla de **{away_team}** jugador por jugador...")
         try:
             results["away_roster"] = _research_team_roster(
-                away_team, home_team, api_key, progress_cb=_cb,
+                away_team,
+                home_team,
+                api_key,
+                progress_cb=_cb,
+                workflow_metrics=workflow_metrics,
+                step_prefix="match_prep.away_roster",
             )
         except Exception as e:
             results["away_roster"] = []
             _cb(f"❌ Error con plantilla de {away_team}: {e}")
     elif _roster_has_failures(results.get("away_roster", [])):
         results["away_roster"] = _retry_failed_roster_players(
-            results["away_roster"], away_team, home_team, api_key, progress_cb=_cb,
+            results["away_roster"],
+            away_team,
+            home_team,
+            api_key,
+            progress_cb=_cb,
+            workflow_metrics=workflow_metrics,
+            step_prefix="match_prep.away_roster",
         )
     else:
         _cb(f"✅ Plantilla de **{away_team}** ya disponible — reutilizando.")
@@ -2443,16 +2807,23 @@ def run_match_preparation(
     # Phase 3: Palomo phrases (skip if already done)
     if not _has_data(results.get("palomo_phrases")):
         _cb("🎙️ Generando frases de Fernando Palomo...")
-        home_context = results["home_history"][0] if isinstance(results["home_history"], tuple) else ""
-        away_context = results["away_history"][0] if isinstance(results["away_history"], tuple) else ""
+        home_context, _, _ = _unpack_text_result(results.get("home_history"))
+        away_context, _, _ = _unpack_text_result(results.get("away_history"))
 
         try:
             results["palomo_phrases"] = _research_palomo_phrases(
                 home_team, away_team, tournament, match_type, stadium,
                 home_context, away_context, api_key,
             )
+            _, _, phrase_tokens = _unpack_text_result(results["palomo_phrases"])
+            _record_workflow_step(
+                workflow_metrics,
+                "match_prep.palomo_phrases",
+                "Frases de Palomo",
+                phrase_tokens,
+            )
         except Exception as e:
-            results["palomo_phrases"] = (f"❌ Error generando frases: {e}", [])
+            results["palomo_phrases"] = (f"❌ Error generando frases: {e}", [], _empty_token_usage())
     else:
         _cb("✅ Frases de Palomo ya disponibles — reutilizando.")
 
@@ -2480,7 +2851,7 @@ def _research_single_player_solo(
         current_date=CURRENT_DATE,
     )
 
-    text, sources = _gemini_request(
+    text, sources, tokens = _gemini_request(
         api_key=api_key,
         system_prompt=prompt,
         user_message=(
@@ -2496,6 +2867,7 @@ def _research_single_player_solo(
         "number": player.get("number", ""),
         "text": text,
         "sources": sources,
+        "tokens": tokens,
     }
 
 
@@ -2503,11 +2875,20 @@ def _research_team_roster_solo(
     team_name: str,
     api_key: str,
     progress_cb: Optional[Callable[[str], None]] = None,
+    workflow_metrics: Optional[Dict[str, Any]] = None,
+    step_prefix: str = "roster",
 ) -> List[Dict[str, Any]]:
     """Research a team's full roster player-by-player (no opponent context)."""
     if progress_cb:
         progress_cb(f"📋 Obteniendo lista de jugadores de **{team_name}**...")
-    players = _fetch_player_list(team_name, api_key)
+    players, list_tokens = _fetch_player_list(team_name, api_key)
+    if workflow_metrics is not None:
+        _record_workflow_step(
+            workflow_metrics,
+            f"{step_prefix}.fetch_player_list",
+            f"{team_name}: lista de jugadores",
+            list_tokens,
+        )
     total = len(players)
     if progress_cb:
         progress_cb(f"✅ {total} jugadores encontrados en **{team_name}**. Investigando uno por uno...")
@@ -2534,7 +2915,16 @@ def _research_team_roster_solo(
                         "number": p.get("number", ""),
                         "text": f"❌ Error investigando: {e}",
                         "sources": [],
+                        "tokens": _empty_token_usage(),
                     }
+                if workflow_metrics is not None:
+                    _record_workflow_step(
+                        workflow_metrics,
+                        f"{step_prefix}.player_dossier",
+                        f"{team_name}: dossier de jugador",
+                        results[idx].get("tokens"),
+                        entity=str(results[idx].get("name", "?")),
+                    )
                 completed += 1
                 if progress_cb:
                     pname = results[idx]["name"]
@@ -2556,14 +2946,23 @@ def run_team_research(
         "team_history": ("", []),
         "roster": [],
     }
+    workflow_metrics = _ensure_workflow_metrics(results, "team_research")
 
     # Phase 1: team history
     if not _has_data(results.get("team_history")):
         _cb(f"📊 Investigando historial de **{team_name}**...")
         try:
             results["team_history"] = _research_team_history(team_name, api_key)
+            _, _, tokens = _unpack_text_result(results["team_history"])
+            _record_workflow_step(
+                workflow_metrics,
+                "team_research.team_history",
+                "Historial del equipo",
+                tokens,
+                entity=team_name,
+            )
         except Exception as e:
-            results["team_history"] = (f"❌ Error investigando historial: {e}", [])
+            results["team_history"] = (f"❌ Error investigando historial: {e}", [], _empty_token_usage())
         _cb("✅ Historial completado.")
     else:
         _cb("✅ Historial ya disponible — reutilizando.")
@@ -2572,13 +2971,25 @@ def run_team_research(
     if not _has_data(results.get("roster")):
         _cb(f"👥 Investigando plantilla de **{team_name}** jugador por jugador...")
         try:
-            results["roster"] = _research_team_roster_solo(team_name, api_key, progress_cb=_cb)
+            results["roster"] = _research_team_roster_solo(
+                team_name,
+                api_key,
+                progress_cb=_cb,
+                workflow_metrics=workflow_metrics,
+                step_prefix="team_research.roster",
+            )
         except Exception as e:
             results["roster"] = []
             _cb(f"❌ Error con plantilla de {team_name}: {e}")
     elif _roster_has_failures(results.get("roster", [])):
         results["roster"] = _retry_failed_roster_players(
-            results["roster"], team_name, "", api_key, progress_cb=_cb,
+            results["roster"],
+            team_name,
+            "",
+            api_key,
+            progress_cb=_cb,
+            workflow_metrics=workflow_metrics,
+            step_prefix="team_research.roster",
         )
     else:
         _cb(f"✅ Plantilla de **{team_name}** ya disponible — reutilizando.")
@@ -2601,6 +3012,7 @@ def run_player_research(
     """Research a single player in depth."""
     _cb = progress_cb or (lambda _msg: None)
     results: Dict[str, Any] = partial_results or {"dossier": ("", [])}
+    workflow_metrics = _ensure_workflow_metrics(results, "player_research")
 
     if not _has_data(results.get("dossier")):
         pos_label = _POS_LABELS.get(position, position or "Jugador")
@@ -2622,8 +3034,16 @@ def run_player_research(
                     "estadísticas de esta temporada y situación contractual. Factor WOW al máximo."
                 ),
             )
+            _, _, tokens = _unpack_text_result(results["dossier"])
+            _record_workflow_step(
+                workflow_metrics,
+                "player_research.dossier",
+                "Dossier del jugador",
+                tokens,
+                entity=player_name,
+            )
         except Exception as e:
-            results["dossier"] = (f"❌ Error investigando: {e}", [])
+            results["dossier"] = (f"❌ Error investigando: {e}", [], _empty_token_usage())
         _cb("✅ Dossier completado.")
     else:
         _cb("✅ Dossier ya disponible — reutilizando.")
@@ -2647,7 +3067,7 @@ def _research_national_player_solo(
         country=country,
         current_date=CURRENT_DATE,
     )
-    text, sources = _gemini_request(
+    text, sources, tokens = _gemini_request(
         api_key=api_key,
         system_prompt=prompt,
         user_message=(
@@ -2661,6 +3081,7 @@ def _research_national_player_solo(
         "number": player.get("number", ""),
         "text": text,
         "sources": sources,
+        "tokens": tokens,
     }
 
 
@@ -2668,11 +3089,20 @@ def _research_national_roster(
     country: str,
     api_key: str,
     progress_cb: Optional[Callable[[str], None]] = None,
+    workflow_metrics: Optional[Dict[str, Any]] = None,
+    step_prefix: str = "roster",
 ) -> List[Dict[str, Any]]:
     """Fetch and research the national team's current convocatoria player-by-player."""
     if progress_cb:
         progress_cb(f"📋 Obteniendo convocatoria de **{country}**...")
-    players = _fetch_player_list(country, api_key)
+    players, list_tokens = _fetch_player_list(country, api_key)
+    if workflow_metrics is not None:
+        _record_workflow_step(
+            workflow_metrics,
+            f"{step_prefix}.fetch_player_list",
+            f"{country}: lista de convocados",
+            list_tokens,
+        )
     total = len(players)
     if progress_cb:
         progress_cb(f"✅ {total} convocados de **{country}**. Investigando uno por uno...")
@@ -2699,7 +3129,16 @@ def _research_national_roster(
                         "number": p.get("number", ""),
                         "text": f"❌ Error investigando: {e}",
                         "sources": [],
+                        "tokens": _empty_token_usage(),
                     }
+                if workflow_metrics is not None:
+                    _record_workflow_step(
+                        workflow_metrics,
+                        f"{step_prefix}.player_dossier",
+                        f"{country}: dossier de convocado",
+                        results[idx].get("tokens"),
+                        entity=str(results[idx].get("name", "?")),
+                    )
                 completed += 1
                 if progress_cb:
                     pname = results[idx]["name"]
@@ -2721,6 +3160,7 @@ def run_national_team_research(
         "team_history": ("", []),
         "roster": [],
     }
+    workflow_metrics = _ensure_workflow_metrics(results, "national_team_research")
 
     if not _has_data(results.get("team_history")):
         _cb(f"📊 Investigando historial de **{country}**...")
@@ -2740,8 +3180,16 @@ def run_national_team_research(
                     "récords y datos curiosos."
                 ),
             )
+            _, _, tokens = _unpack_text_result(results["team_history"])
+            _record_workflow_step(
+                workflow_metrics,
+                "national_team_research.team_history",
+                "Historial de la selección",
+                tokens,
+                entity=country,
+            )
         except Exception as e:
-            results["team_history"] = (f"❌ Error: {e}", [])
+            results["team_history"] = (f"❌ Error: {e}", [], _empty_token_usage())
         _cb("✅ Historial completado.")
     else:
         _cb("✅ Historial ya disponible — reutilizando.")
@@ -2749,13 +3197,26 @@ def run_national_team_research(
     if not _has_data(results.get("roster")):
         _cb(f"👥 Investigando convocatoria de **{country}**...")
         try:
-            results["roster"] = _research_national_roster(country, api_key, progress_cb=_cb)
+            results["roster"] = _research_national_roster(
+                country,
+                api_key,
+                progress_cb=_cb,
+                workflow_metrics=workflow_metrics,
+                step_prefix="national_team_research.roster",
+            )
         except Exception as e:
             results["roster"] = []
             _cb(f"❌ Error con convocatoria de {country}: {e}")
     elif _roster_has_failures(results.get("roster", [])):
         results["roster"] = _retry_failed_roster_players(
-            results["roster"], country, "", api_key, progress_cb=_cb,
+            results["roster"],
+            country,
+            "",
+            api_key,
+            progress_cb=_cb,
+            research_fn=lambda player: _research_national_player_solo(player, country, api_key),
+            workflow_metrics=workflow_metrics,
+            step_prefix="national_team_research.roster",
         )
     else:
         _cb(f"✅ Convocatoria de **{country}** ya disponible — reutilizando.")
@@ -2781,6 +3242,7 @@ def run_national_match_prep(
         "away_roster": [],
         "palomo_phrases": ("", []),
     }
+    workflow_metrics = _ensure_workflow_metrics(results, "national_match_prep")
 
     match_prompt = _NATIONAL_MATCH_PREP_PROMPT.format(
         home_country=home_country,
@@ -2803,8 +3265,16 @@ def run_national_match_prep(
                     "selecciones, jugadores clave, bajas, claves tácticas y frases Palomo."
                 ),
             )
+            _, _, tokens = _unpack_text_result(results["home_history"])
+            _record_workflow_step(
+                workflow_metrics,
+                "national_match_prep.match_analysis",
+                "Análisis del partido",
+                tokens,
+                entity=f"{home_country} vs {away_country}",
+            )
         except Exception as e:
-            results["home_history"] = (f"❌ Error en análisis: {e}", [])
+            results["home_history"] = (f"❌ Error en análisis: {e}", [], _empty_token_usage())
         _cb("✅ Análisis del partido completado.")
     else:
         _cb("✅ Análisis ya disponible — reutilizando.")
@@ -2813,13 +3283,26 @@ def run_national_match_prep(
     if not _has_data(results.get("home_roster")):
         _cb(f"👥 Investigando convocatoria de **{home_country}**...")
         try:
-            results["home_roster"] = _research_national_roster(home_country, api_key, progress_cb=_cb)
+            results["home_roster"] = _research_national_roster(
+                home_country,
+                api_key,
+                progress_cb=_cb,
+                workflow_metrics=workflow_metrics,
+                step_prefix="national_match_prep.home_roster",
+            )
         except Exception as e:
             results["home_roster"] = []
             _cb(f"❌ Error con convocatoria de {home_country}: {e}")
     elif _roster_has_failures(results.get("home_roster", [])):
         results["home_roster"] = _retry_failed_roster_players(
-            results["home_roster"], home_country, away_country, api_key, progress_cb=_cb,
+            results["home_roster"],
+            home_country,
+            away_country,
+            api_key,
+            progress_cb=_cb,
+            research_fn=lambda player: _research_national_player_solo(player, home_country, api_key),
+            workflow_metrics=workflow_metrics,
+            step_prefix="national_match_prep.home_roster",
         )
     else:
         _cb(f"✅ Convocatoria de **{home_country}** ya disponible — reutilizando.")
@@ -2828,13 +3311,26 @@ def run_national_match_prep(
     if not _has_data(results.get("away_roster")):
         _cb(f"👥 Investigando convocatoria de **{away_country}**...")
         try:
-            results["away_roster"] = _research_national_roster(away_country, api_key, progress_cb=_cb)
+            results["away_roster"] = _research_national_roster(
+                away_country,
+                api_key,
+                progress_cb=_cb,
+                workflow_metrics=workflow_metrics,
+                step_prefix="national_match_prep.away_roster",
+            )
         except Exception as e:
             results["away_roster"] = []
             _cb(f"❌ Error con convocatoria de {away_country}: {e}")
     elif _roster_has_failures(results.get("away_roster", [])):
         results["away_roster"] = _retry_failed_roster_players(
-            results["away_roster"], away_country, home_country, api_key, progress_cb=_cb,
+            results["away_roster"],
+            away_country,
+            home_country,
+            api_key,
+            progress_cb=_cb,
+            research_fn=lambda player: _research_national_player_solo(player, away_country, api_key),
+            workflow_metrics=workflow_metrics,
+            step_prefix="national_match_prep.away_roster",
         )
     else:
         _cb(f"✅ Convocatoria de **{away_country}** ya disponible — reutilizando.")
@@ -2852,6 +3348,7 @@ def run_national_player_research(
     """Research a single national team player in depth."""
     _cb = progress_cb or (lambda _msg: None)
     results: Dict[str, Any] = partial_results or {"dossier": ("", [])}
+    workflow_metrics = _ensure_workflow_metrics(results, "national_player_research")
 
     if not _has_data(results.get("dossier")):
         _cb(f"🔍 Investigando dossier de **{player_name}** (selección de {country})...")
@@ -2870,8 +3367,16 @@ def run_national_player_research(
                     "caps, goles internacionales, torneos, debut, récords, y factor WOW."
                 ),
             )
+            _, _, tokens = _unpack_text_result(results["dossier"])
+            _record_workflow_step(
+                workflow_metrics,
+                "national_player_research.dossier",
+                "Dossier del convocado",
+                tokens,
+                entity=player_name,
+            )
         except Exception as e:
-            results["dossier"] = (f"❌ Error investigando: {e}", [])
+            results["dossier"] = (f"❌ Error investigando: {e}", [], _empty_token_usage())
         _cb("✅ Dossier completado.")
     else:
         _cb("✅ Dossier ya disponible — reutilizando.")
@@ -3414,12 +3919,13 @@ def _render_palomo_gpt(api_key: str, incoming_query: Optional[str] = None) -> No
 
     # Get response
     followups = []
+    workflow_metrics = _init_workflow_metrics("palomo_gpt")
     with st.chat_message("assistant"):
         try:
             with st.status(
                 "🔍 Buscando información verificada...", expanded=False
             ) as status:
-                text, citations, reasoning_chain, followups = get_palomo_response(
+                text, citations, reasoning_chain, followups, workflow_metrics = get_palomo_response(
                     query=incoming_query,
                     session_messages=msgs,
                     api_key=api_key,
@@ -3432,6 +3938,7 @@ def _render_palomo_gpt(api_key: str, incoming_query: Optional[str] = None) -> No
                 full_response += source_text
 
             st.markdown(full_response)
+            _render_workflow_metrics(workflow_metrics, "📈 Uso de tokens de esta respuesta")
             msgs.append({"role": "assistant", "content": full_response})
             _save_message(conv_id, "assistant", full_response)
 
@@ -3573,6 +4080,7 @@ def _render_match_prep(api_key: str) -> None:
 
         # --- Validate match via LLM ---
         with st.status("🔍 Validando equipos y partido...", expanded=True) as val_status:
+            validation_metrics = _init_workflow_metrics("match_preparation")
             try:
                 val_prompt = _MATCH_VALIDATION_PROMPT.format(
                     home_team=home_team,
@@ -3580,10 +4088,17 @@ def _render_match_prep(api_key: str) -> None:
                     tournament=tournament,
                     current_date=CURRENT_DATE,
                 )
-                val_text, _ = _gemini_request(
+                val_text, _, val_tokens = _gemini_request(
                     api_key=api_key,
                     system_prompt=val_prompt,
                     user_message="Valida este partido y devuelve el JSON.",
+                )
+                _record_workflow_step(
+                    validation_metrics,
+                    "match_validation",
+                    "Validación del partido",
+                    val_tokens,
+                    entity=f"{home_team} vs {away_team}",
                 )
 
                 # Parse JSON from response
@@ -3617,13 +4132,18 @@ def _render_match_prep(api_key: str) -> None:
             "stadium": stadium,
         }
 
-        _run_match_pipeline(st.session_state.match_config, api_key)
+        _run_match_pipeline(
+            st.session_state.match_config,
+            api_key,
+            initial_metrics=validation_metrics,
+        )
 
 
 def _run_match_pipeline(
     config: dict,
     api_key: str,
     partial_results: Optional[Dict[str, Any]] = None,
+    initial_metrics: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Run (or resume) the match preparation research pipeline."""
     home_team = config["home_team"]
@@ -3645,6 +4165,7 @@ def _run_match_pipeline(
                 api_key=api_key,
                 progress_cb=_progress,
                 partial_results=partial_results,
+                initial_metrics=initial_metrics,
             )
             st.session_state.match_results = results
             st.session_state.pop("match_pdf_bytes", None)  # clear stale PDF
@@ -3766,6 +4287,8 @@ def _display_match_results(config: dict, results: dict) -> None:
             if pdf_ok:
                 st.rerun()
 
+    _render_workflow_metrics(results.get("workflow_metrics"), "📈 Uso de tokens del informe")
+
     # ---- Team Histories (side-by-side) ----
     st.markdown("### 📊 Historial de Temporadas")
 
@@ -3776,7 +4299,7 @@ def _display_match_results(config: dict, results: dict) -> None:
             f'<div class="team-col-hdr"><h3>🏠 {home}</h3></div>',
             unsafe_allow_html=True,
         )
-        h_text, h_srcs = results["home_history"]
+        h_text, h_srcs, _ = _unpack_text_result(results.get("home_history"))
         st.markdown(h_text)
         if h_srcs:
             with st.expander("📚 Fuentes"):
@@ -3789,7 +4312,7 @@ def _display_match_results(config: dict, results: dict) -> None:
             f'<div class="team-col-hdr"><h3>✈️ {away}</h3></div>',
             unsafe_allow_html=True,
         )
-        a_text, a_srcs = results["away_history"]
+        a_text, a_srcs, _ = _unpack_text_result(results.get("away_history"))
         st.markdown(a_text)
         if a_srcs:
             with st.expander("📚 Fuentes"):
@@ -3826,7 +4349,7 @@ def _display_match_results(config: dict, results: dict) -> None:
         unsafe_allow_html=True,
     )
 
-    p_text, p_srcs = results["palomo_phrases"]
+    p_text, p_srcs, _ = _unpack_text_result(results.get("palomo_phrases"))
     st.markdown(p_text)
     if p_srcs:
         with st.expander("📚 Fuentes"):
@@ -3976,9 +4499,11 @@ def _display_team_research_results(config: dict, results: dict) -> None:
         unsafe_allow_html=True,
     )
 
+    _render_workflow_metrics(results.get("workflow_metrics"), "📈 Uso de tokens de la investigación")
+
     # ---- Team History (full width) ----
     st.markdown("### 📊 Historial de Temporadas")
-    h_text, h_srcs = results.get("team_history", ("", []))
+    h_text, h_srcs, _ = _unpack_text_result(results.get("team_history"))
     st.markdown(h_text)
     if h_srcs:
         with st.expander("📚 Fuentes"):
@@ -4125,9 +4650,11 @@ def _display_player_research_results(config: dict, results: dict) -> None:
         unsafe_allow_html=True,
     )
 
+    _render_workflow_metrics(results.get("workflow_metrics"), "📈 Uso de tokens del dossier")
+
     # ---- Dossier (full width) ----
     st.markdown("### 📋 Dossier Completo")
-    dossier_text, dossier_srcs = results.get("dossier", ("", []))
+    dossier_text, dossier_srcs, _ = _unpack_text_result(results.get("dossier"))
     st.markdown(dossier_text)
     if dossier_srcs:
         with st.expander("📚 Fuentes"):
@@ -4271,8 +4798,9 @@ def _display_sel_team_results(config: dict, results: dict) -> None:
         f'<div class="match-meta">{meta}</div></div>',
         unsafe_allow_html=True,
     )
+    _render_workflow_metrics(results.get("workflow_metrics"), "📈 Uso de tokens de la investigación")
     st.markdown("### 📊 Historial de la Selección")
-    h_text, h_srcs = results.get("team_history", ("", []))
+    h_text, h_srcs, _ = _unpack_text_result(results.get("team_history"))
     st.markdown(h_text)
     if h_srcs:
         with st.expander("📚 Fuentes"):
@@ -4400,9 +4928,11 @@ def _display_sel_match_results(config: dict, results: dict) -> None:
         unsafe_allow_html=True,
     )
 
+    _render_workflow_metrics(results.get("workflow_metrics"), "📈 Uso de tokens del partido")
+
     # Main analysis
     st.markdown("### 📊 Análisis del Partido")
-    h_text, h_srcs = results.get("home_history", ("", []))
+    h_text, h_srcs, _ = _unpack_text_result(results.get("home_history"))
     st.markdown(h_text)
     if h_srcs:
         with st.expander("📚 Fuentes"):
@@ -4511,8 +5041,9 @@ def _display_sel_player_results(config: dict, results: dict) -> None:
         f'<div class="match-meta">{meta}</div></div>',
         unsafe_allow_html=True,
     )
+    _render_workflow_metrics(results.get("workflow_metrics"), "📈 Uso de tokens del dossier")
     st.markdown("### 📋 Dossier Internacional")
-    dossier_text, dossier_srcs = results.get("dossier", ("", []))
+    dossier_text, dossier_srcs, _ = _unpack_text_result(results.get("dossier"))
     st.markdown(dossier_text)
     if dossier_srcs:
         with st.expander("📚 Fuentes"):
