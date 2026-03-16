@@ -4482,63 +4482,112 @@ def _render_dashboard_page() -> None:
             st.rerun()
 
     usage_rows = _load_usage_runs(filter_key)
-    aggregate = _aggregate_usage_rows(usage_rows)
-    totals = aggregate["totals"]
-    by_model = _aggregate_usage_by_model(usage_rows)
-    by_workflow = _aggregate_usage_by_workflow(usage_rows)
-    recent_rows = _serialize_usage_recent_rows(usage_rows, limit=15)
 
-    metric_cols = st.columns(6)
-    metric_cols[0].metric("Raw Cost", _format_cost(aggregate["estimated_cost_usd"]))
-    metric_cols[1].metric("Runs", _format_metric_number(aggregate["runs"]))
-    metric_cols[2].metric("Input", _format_metric_number(totals["input_tokens"]))
-    metric_cols[3].metric("Output", _format_metric_number(totals["output_tokens"]))
-    metric_cols[4].metric("Total", _format_metric_number(totals["total_tokens"]))
-    metric_cols[5].metric("Web Search", _format_metric_number(totals["grounding_requests"]))
+    if not usage_rows:
+        st.info("No usage data found yet. Run the app or use backfill to populate the ledger.")
+        return
 
     st.caption(
         "Note: older structured workflows can be backfilled from saved `workflow_metrics`, "
         "but historical PalomoGPT traffic and older PDF exports from before this release were not persisted."
     )
 
-    if not usage_rows:
-        st.info("No usage data found yet. Run the app or use backfill to populate the ledger.")
-        return
+    by_model = _aggregate_usage_by_model(usage_rows)
+    by_workflow = _aggregate_usage_by_workflow(usage_rows)
 
-    st.markdown("### By Model")
-    model_rows = [
-        {
-            "Provider": row["provider"],
-            "Model": row["model"],
-            "Calls": _format_metric_number(row["calls"]),
-            "Input": _format_metric_number(row["input_tokens"]),
-            "Output": _format_metric_number(row["output_tokens"]),
-            "Total": _format_metric_number(row["total_tokens"]),
-            "Search": _format_metric_number(row["grounding_requests"]),
-            "Cost": _format_cost(row["estimated_cost_usd"]),
-        }
-        for row in by_model
-    ]
-    st.dataframe(model_rows, use_container_width=True, hide_index=True)
-
+    # ── By Workflow ────────────────────────────────────────────────────────
     st.markdown("### By Workflow")
-    workflow_rows = [
-        {
-            "Workflow": row["workflow"],
-            "Type": row["source_type"],
-            "Runs": _format_metric_number(row["runs"]),
-            "Input": _format_metric_number(row["input_tokens"]),
-            "Output": _format_metric_number(row["output_tokens"]),
-            "Total": _format_metric_number(row["total_tokens"]),
-            "Search": _format_metric_number(row["grounding_requests"]),
-            "Cost": _format_cost(row["estimated_cost_usd"]),
-        }
-        for row in by_workflow
-    ]
-    st.dataframe(workflow_rows, use_container_width=True, hide_index=True)
+    st.caption("Click a row to filter everything below. Click again to clear.")
+    wf_event = st.dataframe(
+        [
+            {
+                "Workflow": r["workflow"],
+                "Type": r["source_type"],
+                "Runs": _format_metric_number(r["runs"]),
+                "Input": _format_metric_number(r["input_tokens"]),
+                "Output": _format_metric_number(r["output_tokens"]),
+                "Total": _format_metric_number(r["total_tokens"]),
+                "Search": _format_metric_number(r["grounding_requests"]),
+                "Cost": _format_cost(r["estimated_cost_usd"]),
+            }
+            for r in by_workflow
+        ],
+        use_container_width=True,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        key="dash_wf_table",
+    )
 
+    # ── By Model ───────────────────────────────────────────────────────────
+    st.markdown("### By Model")
+    st.caption("Click a row to filter everything below. Click again to clear.")
+    model_event = st.dataframe(
+        [
+            {
+                "Provider": r["provider"],
+                "Model": r["model"],
+                "Calls": _format_metric_number(r["calls"]),
+                "Input": _format_metric_number(r["input_tokens"]),
+                "Output": _format_metric_number(r["output_tokens"]),
+                "Total": _format_metric_number(r["total_tokens"]),
+                "Search": _format_metric_number(r["grounding_requests"]),
+                "Cost": _format_cost(r["estimated_cost_usd"]),
+            }
+            for r in by_model
+        ],
+        use_container_width=True,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        key="dash_model_table",
+    )
+
+    # ── Resolve active filter ──────────────────────────────────────────────
+    filtered_rows = usage_rows
+    filter_label: Optional[str] = None
+
+    wf_sel = wf_event.selection.rows
+    model_sel = model_event.selection.rows
+
+    if wf_sel and wf_sel[0] < len(by_workflow):
+        sel = by_workflow[wf_sel[0]]
+        filtered_rows = [
+            r for r in usage_rows
+            if r.get("workflow") == sel["workflow"] and r.get("source_type") == sel["source_type"]
+        ]
+        filter_label = f"workflow **{sel['workflow']}** ({sel['source_type']})"
+    elif model_sel and model_sel[0] < len(by_model):
+        sel = by_model[model_sel[0]]
+        filtered_rows = [
+            r for r in usage_rows
+            if any(
+                str(s.get("model", "")) == sel["model"] and str(s.get("provider", "")) == sel["provider"]
+                for s in r.get("steps", [])
+            )
+        ]
+        filter_label = f"model **{sel['model']}** ({sel['provider']})"
+
+    # ── KPI metrics (filtered) ─────────────────────────────────────────────
+    st.markdown("---")
+    if filter_label:
+        st.info(f"🔍 {len(filtered_rows):,} / {len(usage_rows):,} runs — {filter_label}. Click same row to clear.")
+    else:
+        st.caption(f"All {len(usage_rows):,} runs. Click any row above to filter.")
+
+    agg = _aggregate_usage_rows(filtered_rows)
+    totals = agg["totals"]
+    metric_cols = st.columns(6)
+    metric_cols[0].metric("Raw Cost", _format_cost(agg["estimated_cost_usd"]))
+    metric_cols[1].metric("Runs", _format_metric_number(agg["runs"]))
+    metric_cols[2].metric("Input", _format_metric_number(totals["input_tokens"]))
+    metric_cols[3].metric("Output", _format_metric_number(totals["output_tokens"]))
+    metric_cols[4].metric("Total", _format_metric_number(totals["total_tokens"]))
+    metric_cols[5].metric("Web Search", _format_metric_number(totals["grounding_requests"]))
+
+    # ── Recent Runs (filtered) ─────────────────────────────────────────────
     st.markdown("### Recent Runs")
-    st.dataframe(recent_rows, use_container_width=True, hide_index=True)
+    st.dataframe(_serialize_usage_recent_rows(filtered_rows, limit=50), use_container_width=True, hide_index=True)
 
 
 def _build_streamlit_page(
