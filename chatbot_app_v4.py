@@ -4687,15 +4687,12 @@ def _render_selecciones(api_key: str) -> None:
     tabs = st.tabs(tab_labels)
 
     with tabs[SEL_TAB_SELECCION]:
-        st.session_state.sel_active_tab = SEL_TAB_SELECCION
         _render_sel_team_tab(api_key)
 
     with tabs[SEL_TAB_PARTIDO]:
-        st.session_state.sel_active_tab = SEL_TAB_PARTIDO
         _render_sel_match_tab(api_key)
 
     with tabs[SEL_TAB_CONVOCADO]:
-        st.session_state.sel_active_tab = SEL_TAB_CONVOCADO
         _render_sel_player_tab(api_key)
 
 
@@ -4752,7 +4749,6 @@ def _render_sel_team_tab(api_key: str) -> None:
             "country": country,
             "confederation": confederation,
         }
-        st.session_state.sel_active_tab = SEL_TAB_SELECCION
         _run_sel_team_pipeline(st.session_state.nat_team_research_config, api_key)
 
 
@@ -4876,7 +4872,6 @@ def _render_sel_match_tab(api_key: str) -> None:
             "tournament": tournament,
             "match_type": match_type,
         }
-        st.session_state.sel_active_tab = SEL_TAB_PARTIDO
         _run_sel_match_pipeline(st.session_state.nat_match_config, api_key)
 
 
@@ -4995,7 +4990,6 @@ def _render_sel_player_tab(api_key: str) -> None:
             "player_name": player_name,
             "country": country,
         }
-        st.session_state.sel_active_tab = SEL_TAB_CONVOCADO
         _run_sel_player_pipeline(st.session_state.nat_player_config, api_key)
 
 
