@@ -1,5 +1,5 @@
 requests
-streamlit
+streamlit>=1.50.0
 fpdf2
 google-genai
 supabase

@@ -33,6 +33,7 @@ The international football counterpart to the Club mode:
 - Python 3.10+
 - A Google Gemini API Key
 - A Supabase Project (URL & Service Key)
+- Streamlit 1.50+ for hidden `/dashboard` routing with `st.Page` and `st.navigation`
 
 ### Installation
 ```bash
@@ -45,6 +46,7 @@ Locally, create a `.streamlit/secrets.toml` file (this is safely gitignored):
 GEMINI_API_KEY = "your-gemini-key"
 SUPABASE_URL = "https://your-project.supabase.co"
 SUPABASE_KEY = "your-supabase-anon-or-service-key"
+DASHBOARD_ACCESS_KEY = "your-admin-dashboard-password"
 ```
 
 ### Run the App
@@ -52,10 +54,18 @@ SUPABASE_KEY = "your-supabase-anon-or-service-key"
 streamlit run chatbot_app_v4.py
 ```
 
+### Usage Dashboard
+- Apply the existing setup SQL files plus `setup_usage_dashboard.sql` in Supabase.
+- Open the normal app at `/`.
+- Open the hidden admin dashboard by going directly to `/dashboard` on the same Streamlit app URL.
+- The dashboard is not linked anywhere in the UI and requires `DASHBOARD_ACCESS_KEY`.
+- Historical structured workflow usage can be backfilled from the dashboard; older PalomoGPT and legacy PDF exports from before this feature cannot be reconstructed.
+
 ## 🛠️ Architecture & Tech Stack
 
 - **Streamlit** — Reactive UI framework with `st.pills` for programmatic state navigation.
 - **Google Gemini (google-genai)** — LLM engine specifically prompted for strict mathematical fact-checking.
 - **Supabase** — PostgreSQL backend for persistent historic state (JSON dicts).
+- **Usage Ledger** — `usage_runs` stores per-run token, search, and raw-cost telemetry for admin analytics.
 - **FPDF** — PDF generation engine for physical broadcaster dossiers.
 - **ThreadPoolExecutor** — Parallel API calls for heavily nested tasks (e.g. batching 4 player dossiers simultaneously).
