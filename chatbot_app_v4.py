@@ -4521,8 +4521,9 @@ def _display_team_research_results(config: dict, results: dict) -> None:
 _PLAYER_POSITION_OPTIONS = ["GK", "DEF", "MID", "FWD"]
 
 
-def _render_player_research(api_key: str) -> None:
-    col_h1, _ = st.columns([3, 1])
+    url_path: Optional[str] = None,
+    if url_path is not None:
+        kwargs["url_path"] = url_path
     with col_h1:
         st.markdown(
             '<p class="hero-title">🧑 Investigar Jugador</p>',
