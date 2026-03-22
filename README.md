@@ -69,3 +69,11 @@ streamlit run chatbot_app_v4.py
 - **Usage Ledger** — `usage_runs` stores per-run token, search, and raw-cost telemetry for admin analytics.
 - **FPDF** — PDF generation engine for physical broadcaster dossiers.
 - **ThreadPoolExecutor** — Parallel API calls for heavily nested tasks (e.g. batching 4 player dossiers simultaneously).
+
+TODO:
+- Investigar entrenador como parte de la investigación de equipo
+- Al correr una investigación hay veces que se queda atorado o se queda en blanco
+- Mejorar la UX/UI al hacer una investigación, al expandir un jugador dar opción de algo como collapse all o volver para arriba y colapsar debajo del prefil de jugador en lugar de hasta arriba de cada investigación
+- Segmentar el análisis del jugador para separar la parte de relación con el rival del resto del análisis. Esto nos permite reusar el análisis del jugador en otras investigaciones sin tener que volver a investigar al jugador.
+- Al correr un match podemos segmentar los equipos para guardarlos (resumen de temporadas, jugadores y entrenador) sin relaciones con otro equipo. Esto nos permite reusar el análisis del equipo en otras investigaciones sin tener que volver a investigar al equipo.
+- Debemos mejorar nuestro UXUI para permitir la investigación de equipos femeniles y jugadores femeniles. Una opción es tener un switch al inicio de la investigación que permita elegir entre femenil y varonil. 

@@ -1187,7 +1187,7 @@ def _load_match_prep(prep_id: str) -> Optional[Dict[str, Any]]:
         # Reconstruct results from JSONB back to tuples where needed
         raw_results = row.get("results", {})
         results = {}
-        for key in ("home_history", "away_history", "palomo_phrases"):
+        for key in ("home_history", "away_history", "home_coach", "away_coach", "palomo_phrases"):
             results[key] = _deserialize_text_result(raw_results.get(key, {}))
         for key in ("home_roster", "away_roster"):
             results[key] = _normalize_roster_entries(raw_results.get(key, []))
@@ -1289,6 +1289,7 @@ def _load_team_research(research_id: str) -> Optional[Dict[str, Any]]:
         raw_results = row.get("results", {})
         results: dict = {}
         results["team_history"] = _deserialize_text_result(raw_results.get("team_history", {}))
+        results["coach"] = _deserialize_text_result(raw_results.get("coach", {}))
         results["roster"] = _normalize_roster_entries(raw_results.get("roster", []))
         results["workflow_metrics"] = _init_workflow_metrics(
             "team_research",
@@ -1485,6 +1486,7 @@ def _load_national_team_research(research_id: str) -> Optional[Dict[str, Any]]:
         raw = row.get("results", {})
         results: dict = {}
         results["team_history"] = _deserialize_text_result(raw.get("team_history", {}))
+        results["coach"] = _deserialize_text_result(raw.get("coach", {}))
         results["roster"] = _normalize_roster_entries(raw.get("roster", []))
         results["workflow_metrics"] = _init_workflow_metrics(
             "national_team_research",
@@ -2051,6 +2053,46 @@ Investiga A FONDO los siguientes aspectos:
 Resalta con 🎯 los datos curiosos más impactantes para que sean fáciles de localizar.
 
 Responde en español. Sé EXHAUSTIVO y PRECISO — NO inventes datos. \
+Si no encuentras un dato específico, omítelo, pero BUSCA A FONDO antes de rendirte.
+FECHA ACTUAL: {current_date}."""
+
+
+_COACH_DOSSIER_PROMPT = """Eres un analista táctico e investigador de élite. Tu misión es crear \
+el dossier MÁS COMPLETO posible sobre el ENTRENADOR/DT actual de un equipo de fútbol para que \
+un narrador de televisión pueda transmitir con autoridad total.
+
+EQUIPO: **{team_name}**{womens_context}
+
+Investiga A FONDO los siguientes aspectos del DT actual:
+
+1. **🎯 IDENTIDAD Y CARRERA COMO ENTRENADOR**
+   - Nombre completo, edad, nacionalidad
+   - Carrera como jugador: clubes, posición, logros si aplica
+   - Inicio como entrenador: primer club, año, contexto
+   - Todos los clubes que ha dirigido con fechas y resultados clave
+   - Títulos ganados como DT (detalla cuáles, con qué club, en qué año)
+
+2. **📋 EN {team_name} ACTUALMENTE**
+   - Fecha de llegada y contexto de la contratación
+   - Récord completo: PJ-PG-PE-PP, % de victorias
+   - Títulos ganados en {team_name}
+   - Sistema táctico preferido (formación, estilo de juego, pressing, build-up)
+   - Jugadores que han mejorado notablemente bajo su mando
+   - Cualquier conflicto notable en el vestuario
+
+3. **📊 SITUACIÓN ACTUAL**
+   - Estado del contrato: ¿hasta cuándo? ¿hay opción de renovar?
+   - Relación con la directiva: confianza, presión, rumores de salida
+   - ¿Hay presión por resultados? ¿cuál es el objetivo mínimo de la temporada?
+
+4. **🎭 DATOS CURIOSOS Y ESTILO**
+   - Anécdotas de vestuario o de rueda de prensa
+   - Declaraciones polémicas o memorables
+   - Su filosofía de juego en sus propias palabras
+   - Curiosidades personales (hobbies, familia, contexto cultural)
+
+Resalta con 🏆 sus mayores logros y con ⚡ sus datos más impactantes.
+Responde en español. Sé EXHAUSTIVO y PRECISO — NO inventes datos.
 Si no encuentras un dato específico, omítelo, pero BUSCA A FONDO antes de rendirte.
 FECHA ACTUAL: {current_date}."""
 
@@ -2703,7 +2745,10 @@ def _gemini_request(
     Retries up to _MAX_RETRIES times with exponential backoff.
     Returns (response_text, sources, token_usage).
     """
-    client = genai.Client(api_key=api_key)
+    client = genai.Client(
+        api_key=api_key,
+        http_options={"timeout": timeout * 1000},  # ms
+    )
 
     tools = []
     if use_search:
@@ -3017,6 +3062,29 @@ def _research_team_history(
     )
 
 
+def _research_coach(
+    team_name: str,
+    api_key: str,
+    is_womens: bool = False,
+) -> Tuple[str, List[Dict[str, str]], Dict[str, Any]]:
+    """Research the head coach of a team."""
+    womens_context = " (equipo femenino)" if is_womens else ""
+    prompt = _COACH_DOSSIER_PROMPT.format(
+        team_name=team_name,
+        womens_context=womens_context,
+        current_date=CURRENT_DATE,
+    )
+    subject = f"equipo femenino de {team_name}" if is_womens else team_name
+    return _gemini_request(
+        api_key=api_key,
+        system_prompt=prompt,
+        user_message=(
+            f"Dame el dossier COMPLETO del entrenador actual del {subject}. "
+            "Incluye su carrera, récord en el club, táctica, situación contractual y datos curiosos."
+        ),
+    )
+
+
 def _fetch_player_list(
     team_name: str,
     api_key: str,
@@ -3318,6 +3386,8 @@ def run_match_preparation(
     results: Dict[str, Any] = partial_results or {
         "home_history": ("", []),
         "away_history": ("", []),
+        "home_coach": ("", []),
+        "away_coach": ("", []),
         "home_roster": [],
         "away_roster": [],
         "palomo_phrases": ("", []),
@@ -3354,6 +3424,35 @@ def run_match_preparation(
         _cb("✅ Historiales completados.")
     else:
         _cb("✅ Historiales ya disponibles — reutilizando.")
+
+    # Phase 1.5: coach research in parallel (skip if already done)
+    need_home_coach = not _has_data(results.get("home_coach"))
+    need_away_coach = not _has_data(results.get("away_coach"))
+    if need_home_coach or need_away_coach:
+        _cb(f"🎯 Investigando entrenadores de **{home_team}** y **{away_team}**...")
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            coach_futures = {}
+            if need_home_coach:
+                coach_futures[executor.submit(_research_coach, home_team, api_key)] = "home_coach"
+            if need_away_coach:
+                coach_futures[executor.submit(_research_coach, away_team, api_key)] = "away_coach"
+            for future in as_completed(coach_futures):
+                key = coach_futures[future]
+                try:
+                    results[key] = future.result()
+                    label = home_team if key == "home_coach" else away_team
+                    _, _, tokens = _unpack_text_result(results[key])
+                    _record_workflow_step(
+                        workflow_metrics,
+                        f"match_prep.{key}",
+                        f"{label}: entrenador",
+                        tokens,
+                    )
+                except Exception as e:
+                    results[key] = (f"❌ Error investigando entrenador: {e}", [], _empty_token_usage())
+        _cb("✅ Entrenadores completados.")
+    else:
+        _cb("✅ Entrenadores ya disponibles — reutilizando.")
 
     # Phase 2: rosters — player by player (skip if already done)
     if not _has_data(results.get("home_roster")):
@@ -3545,20 +3644,24 @@ def run_team_research(
     api_key: str,
     progress_cb: Optional[Callable[[str], None]] = None,
     partial_results: Optional[Dict[str, Any]] = None,
+    is_womens: bool = False,
 ) -> Dict[str, Any]:
-    """Run the full team research pipeline (history + roster) with resumability."""
+    """Run the full team research pipeline (history + coach + roster) with resumability."""
     _cb = progress_cb or (lambda _msg: None)
     results: Dict[str, Any] = partial_results or {
         "team_history": ("", []),
+        "coach": ("", []),
         "roster": [],
     }
     workflow_metrics = _ensure_workflow_metrics(results, "team_research")
+    womens_ctx = " (equipo femenino)" if is_womens else ""
+    research_name = f"{team_name}{womens_ctx}"  # name used in all prompts & Google Search
 
     # Phase 1: team history
     if not _has_data(results.get("team_history")):
-        _cb(f"📊 Investigando historial de **{team_name}**...")
+        _cb(f"📊 Investigando historial de **{research_name}**...")
         try:
-            results["team_history"] = _research_team_history(team_name, api_key)
+            results["team_history"] = _research_team_history(research_name, api_key)
             _, _, tokens = _unpack_text_result(results["team_history"])
             _record_workflow_step(
                 workflow_metrics,
@@ -3573,12 +3676,31 @@ def run_team_research(
     else:
         _cb("✅ Historial ya disponible — reutilizando.")
 
+    # Phase 1.5: coach research
+    if not _has_data(results.get("coach")):
+        _cb(f"🎯 Investigando entrenador de **{research_name}**...")
+        try:
+            results["coach"] = _research_coach(research_name, api_key, is_womens=is_womens)
+            _, _, tokens = _unpack_text_result(results["coach"])
+            _record_workflow_step(
+                workflow_metrics,
+                "team_research.coach",
+                "Entrenador del equipo",
+                tokens,
+                entity=team_name,
+            )
+        except Exception as e:
+            results["coach"] = (f"❌ Error investigando entrenador: {e}", [], _empty_token_usage())
+        _cb("✅ Entrenador completado.")
+    else:
+        _cb("✅ Entrenador ya disponible — reutilizando.")
+
     # Phase 2: roster player-by-player
     if not _has_data(results.get("roster")):
-        _cb(f"👥 Investigando plantilla de **{team_name}** jugador por jugador...")
+        _cb(f"👥 Investigando plantilla de **{research_name}** jugador por jugador...")
         try:
             results["roster"] = _research_team_roster_solo(
-                team_name,
+                research_name,
                 api_key,
                 progress_cb=_cb,
                 workflow_metrics=workflow_metrics,
@@ -3590,7 +3712,7 @@ def run_team_research(
     elif _roster_has_failures(results.get("roster", [])):
         results["roster"] = _retry_failed_roster_players(
             results["roster"],
-            team_name,
+            research_name,
             "",
             api_key,
             progress_cb=_cb,
@@ -3598,9 +3720,10 @@ def run_team_research(
             step_prefix="team_research.roster",
         )
     else:
-        _cb(f"✅ Plantilla de **{team_name}** ya disponible — reutilizando.")
+        _cb(f"✅ Plantilla de **{research_name}** ya disponible — reutilizando.")
 
     return results
+
 
 
 # ---------------------------------------------------------------------------
@@ -3760,10 +3883,11 @@ def run_national_team_research(
     progress_cb: Optional[Callable[[str], None]] = None,
     partial_results: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Run national team research: history + convocatoria player-by-player."""
+    """Run national team research: history + coach + convocatoria player-by-player."""
     _cb = progress_cb or (lambda _msg: None)
     results: Dict[str, Any] = partial_results or {
         "team_history": ("", []),
+        "coach": ("", []),
         "roster": [],
     }
     workflow_metrics = _ensure_workflow_metrics(results, "national_team_research")
@@ -3800,6 +3924,25 @@ def run_national_team_research(
     else:
         _cb("✅ Historial ya disponible — reutilizando.")
 
+    # Phase 1.5: coach / seleccionador
+    if not _has_data(results.get("coach")):
+        _cb(f"🎯 Investigando seleccionador de **{country}**...")
+        try:
+            results["coach"] = _research_coach(f"selección de {country}", api_key)
+            _, _, tokens = _unpack_text_result(results["coach"])
+            _record_workflow_step(
+                workflow_metrics,
+                "national_team_research.coach",
+                "Seleccionador",
+                tokens,
+                entity=country,
+            )
+        except Exception as e:
+            results["coach"] = (f"❌ Error investigando seleccionador: {e}", [], _empty_token_usage())
+        _cb("✅ Seleccionador completado.")
+    else:
+        _cb("✅ Seleccionador ya disponible — reutilizando.")
+
     if not _has_data(results.get("roster")):
         _cb(f"👥 Investigando convocatoria de **{country}**...")
         try:
@@ -3828,6 +3971,7 @@ def run_national_team_research(
         _cb(f"✅ Convocatoria de **{country}** ya disponible — reutilizando.")
 
     return results
+
 
 
 def run_national_match_prep(
@@ -5035,12 +5179,30 @@ def _run_match_pipeline(
     st.rerun()
 
 
-def _render_roster_players(roster: list) -> None:
-    """Render a list of player dossiers as individual expanders grouped by position."""
+def _render_roster_players(roster: list, expand_key: str = "roster") -> None:
+    """Render a list of player dossiers as individual expanders grouped by position.
+    Adds collapse-all / expand-all controls above the list.
+    """
     if not roster:
         st.warning("No se encontraron jugadores.")
         return
 
+    # Collapse / Expand all controls
+    expand_state_key = f"expand_all_{expand_key}"
+    if expand_state_key not in st.session_state:
+        st.session_state[expand_state_key] = False
+
+    btn_col1, btn_col2, _ = st.columns([1, 1, 4])
+    with btn_col1:
+        if st.button("⬇️ Expandir todos", key=f"expand_btn_{expand_key}", use_container_width=True):
+            st.session_state[expand_state_key] = True
+            st.rerun()
+    with btn_col2:
+        if st.button("⬆️ Colapsar todos", key=f"collapse_btn_{expand_key}", use_container_width=True):
+            st.session_state[expand_state_key] = False
+            st.rerun()
+
+    expand_all = st.session_state.get(expand_state_key, False)
     # Group by position preserving order
     pos_order = ["GK", "DEF", "MID", "FWD"]
     pos_emoji = {"GK": "🧤", "DEF": "🛡️", "MID": "🎯", "FWD": "⚡"}
@@ -5061,7 +5223,7 @@ def _render_roster_players(roster: list) -> None:
         for p in players:
             number = p.get("number", "")
             label = f"#{number} {p['name']}" if number else p["name"]
-            with st.expander(label, expanded=False):
+            with st.expander(label, expanded=expand_all):
                 st.markdown(p.get("text", ""))
                 sources = p.get("sources", [])
                 if sources:
@@ -5168,6 +5330,36 @@ def _display_match_results(config: dict, results: dict) -> None:
                     _format_sources(a_srcs).replace(_CITATION_SEPARATOR, "")
                 )
 
+    # ---- Coaches (side-by-side) ----
+    home_coach_text, home_coach_srcs, _ = _unpack_text_result(results.get("home_coach"))
+    away_coach_text, away_coach_srcs, _ = _unpack_text_result(results.get("away_coach"))
+    if home_coach_text or away_coach_text:
+        st.markdown("---")
+        st.markdown("### 🎯 Entrenadores")
+        col_hc, col_ac = st.columns(2)
+        with col_hc:
+            st.markdown(
+                f'<div class="team-col-hdr"><h3>🏠 {home}</h3></div>',
+                unsafe_allow_html=True,
+            )
+            st.markdown(home_coach_text)
+            if home_coach_srcs:
+                with st.expander("📚 Fuentes"):
+                    st.markdown(
+                        _format_sources(home_coach_srcs).replace(_CITATION_SEPARATOR, "")
+                    )
+        with col_ac:
+            st.markdown(
+                f'<div class="team-col-hdr"><h3>✈️ {away}</h3></div>',
+                unsafe_allow_html=True,
+            )
+            st.markdown(away_coach_text)
+            if away_coach_srcs:
+                with st.expander("📚 Fuentes"):
+                    st.markdown(
+                        _format_sources(away_coach_srcs).replace(_CITATION_SEPARATOR, "")
+                    )
+
     # ---- Team Rosters (side-by-side, per-player expanders) ----
     st.markdown("---")
     st.markdown("### 👥 Plantillas — Dossier por Jugador")
@@ -5179,14 +5371,14 @@ def _display_match_results(config: dict, results: dict) -> None:
             f'<div class="team-col-hdr"><h3>🏠 {home}</h3></div>',
             unsafe_allow_html=True,
         )
-        _render_roster_players(results.get("home_roster", []))
+        _render_roster_players(results.get("home_roster", []), expand_key=f"mp_home_{config.get('home_team', 'h')}")
 
     with col_ar:
         st.markdown(
             f'<div class="team-col-hdr"><h3>✈️ {away}</h3></div>',
             unsafe_allow_html=True,
         )
-        _render_roster_players(results.get("away_roster", []))
+        _render_roster_players(results.get("away_roster", []), expand_key=f"mp_away_{config.get('away_team', 'a')}")
 
     # ---- Palomo Phrases (full-width) ----
     st.markdown("---")
@@ -5228,7 +5420,7 @@ def _render_match_research(api_key: str) -> None:
         existing = st.session_state.team_research_results
         config = st.session_state.team_research_config
 
-        all_keys = ["team_history", "roster"]
+        all_keys = ["team_history", "coach", "roster"]
         missing = [k for k in all_keys if not _has_data(existing.get(k))]
         has_player_failures = _roster_has_failures(existing.get("roster", []))
         is_incomplete = bool(missing) or has_player_failures
@@ -5271,6 +5463,12 @@ def _render_match_research(api_key: str) -> None:
             key="mr_tournament",
         )
 
+    is_womens = st.toggle(
+        "♀️ Fútbol Femenino",
+        key="mr_is_womens",
+        help="Activa para investigar el equipo femenino",
+    )
+
     can_submit = bool(team_name)
 
     if st.button(
@@ -5286,6 +5484,7 @@ def _render_match_research(api_key: str) -> None:
         st.session_state.team_research_config = {
             "team_name": team_name,
             "tournament": tournament,
+            "is_womens": is_womens,
         }
         _run_team_research_pipeline(st.session_state.team_research_config, api_key)
 
@@ -5312,6 +5511,7 @@ def _run_team_research_pipeline(
                 api_key=api_key,
                 progress_cb=_progress,
                 partial_results=partial_results,
+                is_womens=config.get("is_womens", False),
             )
             st.session_state.team_research_results = results
             status.update(label="✅ ¡Investigación completa!", state="complete", expanded=False)
@@ -5381,10 +5581,20 @@ def _display_team_research_results(config: dict, results: dict) -> None:
         with st.expander("📚 Fuentes"):
             st.markdown(_format_sources(h_srcs).replace(_CITATION_SEPARATOR, ""))
 
+    # ---- Coach ----
+    coach_text, coach_srcs, _ = _unpack_text_result(results.get("coach"))
+    if coach_text and not coach_text.startswith("❌"):
+        st.markdown("---")
+        st.markdown("### 🎯 Entrenador")
+        st.markdown(coach_text)
+        if coach_srcs:
+            with st.expander("📚 Fuentes"):
+                st.markdown(_format_sources(coach_srcs).replace(_CITATION_SEPARATOR, ""))
+
     # ---- Roster (full width, by position) ----
     st.markdown("---")
     st.markdown("### 👥 Plantilla — Dossier por Jugador")
-    _render_roster_players(results.get("roster", []))
+    _render_roster_players(results.get("roster", []), expand_key=f"team_{config.get('team_name', 'team')}")
 
 
 # ---------------------------------------------------------------------------
@@ -5635,6 +5845,12 @@ def _render_sel_team_tab(api_key: str) -> None:
             key="sel_confederation",
         )
 
+    is_womens_sel = st.toggle(
+        "♀️ Fútbol Femenino",
+        key="sel_is_womens",
+        help="Activa para investigar la selección femenina",
+    )
+
     can_submit = bool(country)
     if st.button("🔬 Investigar Selección", use_container_width=True, disabled=not can_submit,
                  type="primary", key="sel_team_submit"):
@@ -5644,6 +5860,7 @@ def _render_sel_team_tab(api_key: str) -> None:
         st.session_state.nat_team_research_config = {
             "country": country,
             "confederation": confederation,
+            "is_womens": is_womens_sel,
         }
         _run_sel_team_pipeline(st.session_state.nat_team_research_config, api_key)
 
@@ -5722,11 +5939,21 @@ def _display_sel_team_results(config: dict, results: dict) -> None:
         with st.expander("📚 Fuentes"):
             st.markdown(_format_sources(h_srcs).replace(_CITATION_SEPARATOR, ""))
 
+    # ---- Seleccionador ----
+    coach_text, coach_srcs, _ = _unpack_text_result(results.get("coach"))
+    if coach_text and not coach_text.startswith("❌"):
+        st.markdown("---")
+        st.markdown("### 🎯 Seleccionador")
+        st.markdown(coach_text)
+        if coach_srcs:
+            with st.expander("📚 Fuentes"):
+                st.markdown(_format_sources(coach_srcs).replace(_CITATION_SEPARATOR, ""))
+
     roster = results.get("roster", [])
     if roster:
         st.markdown("---")
         st.markdown("### 🎽 Convocatoria — Dossier por Jugador")
-        _render_roster_players(roster)
+        _render_roster_players(roster, expand_key=f"sel_{config.get('country', 'sel')}")
 
 
 # ---- Tab 1: Partido de Selecciones --------------------------------------
@@ -5887,14 +6114,14 @@ def _display_sel_match_results(config: dict, results: dict) -> None:
     if home_roster:
         st.markdown("---")
         st.markdown(f"### 🏠 Convocatoria de **{home}**")
-        _render_roster_players(home_roster)
+        _render_roster_players(home_roster, expand_key=f"nmp_home_{config.get('home_country', 'h')}")
 
     # Away roster
     away_roster = results.get("away_roster", [])
     if away_roster:
         st.markdown("---")
         st.markdown(f"### ✈️ Convocatoria de **{away}**")
-        _render_roster_players(away_roster)
+        _render_roster_players(away_roster, expand_key=f"nmp_away_{config.get('away_country', 'a')}")
 
 
 # ---- Tab 2: Investigar Convocado ----------------------------------------
