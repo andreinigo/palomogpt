@@ -5364,11 +5364,16 @@ def _run_match_pipeline(
 
 def _render_roster_players(roster: list, expand_key: str = "roster") -> None:
     """Render a list of player dossiers as individual expanders grouped by position.
-    Adds collapse-all / expand-all controls above the list.
+    Adds collapse-all / expand-all controls above the list, and a
+    'Volver al listado' button inside each expander to collapse all and scroll back up.
     """
     if not roster:
         st.warning("No se encontraron jugadores.")
         return
+
+    # HTML anchor for scroll-to-top
+    anchor_id = f"roster_anchor_{expand_key}"
+    st.markdown(f'<div id="{anchor_id}"></div>', unsafe_allow_html=True)
 
     # Collapse / Expand all controls
     expand_state_key = f"expand_all_{expand_key}"
@@ -5398,6 +5403,7 @@ def _render_roster_players(roster: list, expand_key: str = "roster") -> None:
             pos = "FWD"
         grouped[pos].append(player)
 
+    player_idx = 0  # unique key counter for buttons inside expanders
     for pos in pos_order:
         players = grouped[pos]
         if not players:
@@ -5419,6 +5425,29 @@ def _render_roster_players(roster: list, expand_key: str = "roster") -> None:
                     st.markdown(
                         _format_sources(sources).replace(_CITATION_SEPARATOR, "")
                     )
+                # "Back to top" button — collapses all and scrolls to roster anchor
+                st.markdown("---")
+                if st.button(
+                    "⬆️ Volver al listado",
+                    key=f"back_top_{expand_key}_{player_idx}",
+                    use_container_width=True,
+                ):
+                    st.session_state[expand_state_key] = False
+                    # Inject JS to scroll to the anchor after rerun
+                    st.session_state[f"_scroll_to_{expand_key}"] = True
+                    st.rerun()
+            player_idx += 1
+
+    # Inject scroll JS if triggered by a "Volver al listado" click
+    scroll_key = f"_scroll_to_{expand_key}"
+    if st.session_state.pop(scroll_key, False):
+        st.markdown(
+            f"""<script>
+            var el = document.getElementById('{anchor_id}');
+            if (el) {{ el.scrollIntoView({{behavior: 'smooth', block: 'start'}}); }}
+            </script>""",
+            unsafe_allow_html=True,
+        )
 
 
 def _display_match_results(config: dict, results: dict) -> None:
