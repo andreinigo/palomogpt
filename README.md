@@ -70,10 +70,14 @@ streamlit run chatbot_app_v4.py
 - **FPDF** — PDF generation engine for physical broadcaster dossiers.
 - **ThreadPoolExecutor** — Parallel API calls for heavily nested tasks (e.g. batching 4 player dossiers simultaneously).
 
-TODO:
-- Investigar entrenador como parte de la investigación de equipo
-- Al correr una investigación hay veces que se queda atorado o se queda en blanco
-- Mejorar la UX/UI al hacer una investigación, al expandir un jugador dar opción de algo como collapse all o volver para arriba y colapsar debajo del prefil de jugador en lugar de hasta arriba de cada investigación
-- Segmentar el análisis del jugador para separar la parte de relación con el rival del resto del análisis. Esto nos permite reusar el análisis del jugador en otras investigaciones sin tener que volver a investigar al jugador.
-- Al correr un match podemos segmentar los equipos para guardarlos (resumen de temporadas, jugadores y entrenador) sin relaciones con otro equipo. Esto nos permite reusar el análisis del equipo en otras investigaciones sin tener que volver a investigar al equipo.
-- Debemos mejorar nuestro UXUI para permitir la investigación de equipos femeniles y jugadores femeniles. Una opción es tener un switch al inicio de la investigación que permita elegir entre femenil y varonil. 
+## ✅ Recent Changes
+
+- **Blank/Stuck Protection:** Empty Gemini responses now trigger automatic retry (3 attempts with exponential backoff + Claude fallback). Investigations no longer get stuck or produce blank sections.
+- **Segmented Player Dossiers:** Player research in match prep now produces a reusable base profile and a separate opponent-specific connections analysis (⚡ Conexiones con el rival). Base profiles can be reused across different match preparations.
+- **Team Data Auto-Save & Reuse:** After a successful match prep, each team's history, coach, and roster are auto-saved to `team_researches`. On subsequent matches, team history is pre-loaded (with a 30-day staleness check), while roster and coach are always re-researched to ensure freshness across seasons/transfer windows.
+- **Femenino Switch:** All match and team research modes now include a toggle for women's football, appending the appropriate context to prompts and searches.
+- **Coach Research:** Coach dossiers are now included as part of team investigation in match preparations.
+
+## 📋 TODO
+
+- Mejorar la UX/UI al hacer una investigación, al expandir un jugador dar opción de algo como collapse all o volver para arriba y colapsar debajo del perfil de jugador en lugar de hasta arriba de cada investigación
