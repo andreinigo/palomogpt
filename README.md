@@ -77,7 +77,8 @@ streamlit run chatbot_app_v4.py
 - **Team Data Auto-Save & Reuse:** After a successful match prep, each team's history, coach, and roster are auto-saved to `team_researches`. On subsequent matches, team history is pre-loaded (with a 30-day staleness check), while roster and coach are always re-researched to ensure freshness across seasons/transfer windows.
 - **Femenino Switch:** All match and team research modes now include a toggle for women's football, appending the appropriate context to prompts and searches.
 - **Coach Research:** Coach dossiers are now included as part of team investigation in match preparations.
+- **Player Expander Navigation:** Each player dossier now has a "⬆️ Volver al listado" button at the bottom that collapses all expanders and scrolls back to the top of the roster section.
 
 ## 📋 TODO
 
-- Mejorar la UX/UI al hacer una investigación, al expandir un jugador dar opción de algo como collapse all o volver para arriba y colapsar debajo del perfil de jugador en lugar de hasta arriba de cada investigación
+- (none currently)
