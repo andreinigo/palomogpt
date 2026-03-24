@@ -1313,6 +1313,107 @@ def _delete_team_research(research_id: str) -> None:
         print(f"[Supabase] Error deleting team research: {e}")
 
 
+_TEAM_RESEARCH_MAX_AGE_DAYS = 30  # only reuse team data younger than this
+
+
+def _find_existing_team_research(team_name: str) -> Optional[Dict[str, Any]]:
+    """Look up the most recent team research by team_name.
+
+    Returns deserialized results or None. Skips results older than
+    _TEAM_RESEARCH_MAX_AGE_DAYS to avoid stale data.
+    """
+    sb = _supabase_client()
+    if not sb or not team_name:
+        return None
+    try:
+        resp = (
+            sb.table("team_researches")
+            .select("*")
+            .eq("team_name", team_name)
+            .order("updated_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if not resp.data:
+            return None
+        row = resp.data[0]
+
+        # Staleness check
+        updated_str = row.get("updated_at", "")
+        if updated_str:
+            try:
+                updated_at = datetime.fromisoformat(updated_str.replace("Z", "+00:00"))
+                age_days = (datetime.utcnow().replace(tzinfo=updated_at.tzinfo) - updated_at).days
+                if age_days > _TEAM_RESEARCH_MAX_AGE_DAYS:
+                    print(f"[Supabase] Team research for '{team_name}' is {age_days}d old — skipping reuse")
+                    return None
+            except (ValueError, TypeError):
+                pass  # can't parse date, proceed with data
+
+        raw_results = row.get("results", {})
+        results: dict = {}
+        results["team_history"] = _deserialize_text_result(raw_results.get("team_history", {}))
+        results["coach"] = _deserialize_text_result(raw_results.get("coach", {}))
+        results["roster"] = _normalize_roster_entries(raw_results.get("roster", []))
+        return results
+    except Exception as e:
+        print(f"[Supabase] Error finding team research for '{team_name}': {e}")
+        return None
+
+
+def _auto_save_team_from_match(
+    team_name: str,
+    tournament: str,
+    match_results: dict,
+    side: str,
+) -> None:
+    """Extract team data from match results and save as standalone team research."""
+    sb = _supabase_client()
+    if not sb:
+        return
+    try:
+        team_results = {
+            "team_history": match_results.get(f"{side}_history"),
+            "coach": match_results.get(f"{side}_coach"),
+            "roster": match_results.get(f"{side}_roster"),
+        }
+        # Only save if there's meaningful data
+        if not _has_data(team_results.get("team_history")):
+            return
+
+        json_results: dict = {}
+        for key, val in team_results.items():
+            json_results[key] = _serialize_result_value(val)
+
+        payload = {
+            "title": team_name,
+            "team_name": team_name,
+            "tournament": tournament,
+            "config": {"team_name": team_name, "tournament": tournament},
+            "results": json_results,
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+
+        # Upsert: find existing row by team_name, update if found, else insert
+        existing = (
+            sb.table("team_researches")
+            .select("id")
+            .eq("team_name", team_name)
+            .order("updated_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if existing.data:
+            existing_id = existing.data[0]["id"]
+            sb.table("team_researches").update(payload).eq("id", existing_id).execute()
+            print(f"[Supabase] Auto-updated team research from match: '{team_name}' ({existing_id})")
+        else:
+            sb.table("team_researches").insert(payload).execute()
+            print(f"[Supabase] Auto-saved team research from match: '{team_name}'")
+    except Exception as e:
+        print(f"[Supabase] Error auto-saving team from match: {e}")
+
+
 # --- Player Research persistence helpers ---
 
 def _save_player_research(config: dict, results: dict) -> str:
@@ -2056,6 +2157,30 @@ Responde en español. Sé EXHAUSTIVO y PRECISO — NO inventes datos. \
 Si no encuentras un dato específico, omítelo, pero BUSCA A FONDO antes de rendirte.
 FECHA ACTUAL: {current_date}."""
 
+_OPPONENT_CONNECTION_PROMPT = """Eres un investigador de fútbol de élite. Tu misión es encontrar \
+TODAS las conexiones posibles entre un jugador y un equipo rival específico. \
+Este análisis será usado por un narrador de televisión para un partido.
+
+JUGADOR: **{player_name}** ({player_position}) — juega en **{team_name}**
+RIVAL: **{opponent_name}**
+
+Investiga A FONDO las siguientes conexiones:
+
+1. **¿Jugó en {opponent_name}?** ¿En qué años, cuántos partidos, qué hizo?
+2. **¿Fue formado ahí?** ¿Rechazó fichar por ellos? ¿Estuvo cerca de ir?
+3. **¿Tiene familiar, amigo cercano o excompañero en {opponent_name}?**
+4. **¿Actuaciones memorables CONTRA {opponent_name}?** (goles, asistencias, expulsiones)
+5. **¿Declaraciones polémicas o interesantes sobre {opponent_name} o sus jugadores?**
+6. **¿Comparte selección nacional con algún jugador de {opponent_name}?**
+7. **Cualquier otro vínculo** — misma ciudad natal que un rival, agentes en común, \
+   fueron compañeros en otro club, etc.
+
+Si NO hay ninguna conexión, indícalo brevemente.
+
+Resalta con ⚡ las conexiones más relevantes.
+Responde en español. Sé EXHAUSTIVO y PRECISO — NO inventes datos.
+FECHA ACTUAL: {current_date}."""
+
 
 _COACH_DOSSIER_PROMPT = """Eres un analista táctico e investigador de élite. Tu misión es crear \
 el dossier MÁS COMPLETO posible sobre el ENTRENADOR/DT actual de un equipo de fútbol para que \
@@ -2786,6 +2911,9 @@ def _gemini_request(
             )
 
             text = response.text or ""
+            if not text.strip():
+                print(f"[Gemini] Empty response on attempt {attempt + 1}/{_MAX_RETRIES} — retrying...")
+                raise RuntimeError("Gemini returned empty response")
             token_usage = _empty_token_usage(model=model, provider="google")
             if hasattr(response, "usage_metadata") and response.usage_metadata:
                 um = response.usage_metadata
@@ -3133,12 +3261,18 @@ def _research_single_player(
     opponent_name: str,
     api_key: str,
 ) -> Dict[str, Any]:
-    """Research a single player. Returns {name, position, text, sources}."""
-    player_name = player.get("name", player.get("full_name", "Unknown"))
-    position = player.get("position", "")
+    """Research a single player with segmented output: base dossier + opponent connections.
+    Returns {name, position, number, text (base), opponent_text, sources, tokens}.
+    """
+    # Step 1: solo dossier (reusable across matches)
+    base = _research_single_player_solo(player, team_name, api_key)
+
+    # Step 2: opponent-specific connections
+    player_name = base["name"]
+    position = base["position"]
     pos_label = _POS_LABELS.get(position, position)
 
-    prompt = _PLAYER_DOSSIER_PROMPT.format(
+    conn_prompt = _OPPONENT_CONNECTION_PROMPT.format(
         player_name=player_name,
         player_position=pos_label,
         team_name=team_name,
@@ -3146,25 +3280,34 @@ def _research_single_player(
         current_date=CURRENT_DATE,
     )
 
-    text, sources, tokens = _gemini_request(
-        api_key=api_key,
-        system_prompt=prompt,
-        user_message=(
-            f"Dame el dossier COMPLETO de {player_name} ({pos_label}) de {team_name}. "
-            f"El próximo rival es {opponent_name} — busca TODAS las conexiones posibles. "
-            "Incluye biografía, trayectoria, vida personal, datos curiosos, "
-            "estadísticas de esta temporada, y situación contractual."
-        ),
-    )
+    try:
+        conn_text, conn_sources, conn_tokens = _gemini_request(
+            api_key=api_key,
+            system_prompt=conn_prompt,
+            user_message=(
+                f"Investiga TODAS las conexiones de {player_name} con {opponent_name}. "
+                "Incluye historial en ese club, partidos contra ellos, vínculos personales, "
+                "compañeros de selección y cualquier otra relación."
+            ),
+        )
+    except Exception as e:
+        conn_text = f"⚡ No se pudo investigar conexiones con {opponent_name}: {e}"
+        conn_sources = []
+        conn_tokens = _empty_token_usage()
 
+    # Merge tokens
+    merged_tokens = _empty_token_usage()
+    for key in ("input_tokens", "output_tokens", "total_tokens", "grounding_requests"):
+        merged_tokens[key] = base.get("tokens", {}).get(key, 0) + conn_tokens.get(key, 0)
 
     return {
         "name": player_name,
         "position": position,
-        "number": player.get("number", ""),
-        "text": text,
-        "sources": sources,
-        "tokens": tokens,
+        "number": base.get("number", ""),
+        "text": base["text"],
+        "opponent_text": conn_text,
+        "sources": base.get("sources", []) + conn_sources,
+        "tokens": merged_tokens,
     }
 
 
@@ -3400,6 +3543,20 @@ def run_match_preparation(
     womens_ctx = " (equipo femenino)" if is_womens else ""
     research_home = f"{home_team}{womens_ctx}"
     research_away = f"{away_team}{womens_ctx}"
+
+    # Pre-load *stable* data from existing team research if available.
+    # Only reuse team_history (very stable). Roster and coach change
+    # between seasons/transfer windows, so always re-research those.
+    if not partial_results:
+        for side, team in [("home", research_home), ("away", research_away)]:
+            try:
+                existing = _find_existing_team_research(team)
+                if existing:
+                    if not _has_data(results.get(f"{side}_history")):
+                        results[f"{side}_history"] = existing.get("team_history", ("", []))
+                    _cb(f"♻️ Reutilizando historial de **{team}** (plantel y DT se investigan de nuevo)")
+            except Exception as e:
+                print(f"[MatchPrep] Error pre-loading team data for {team}: {e}")
 
     # Phase 1: team histories in parallel (skip if already done)
     need_home_hist = not _has_data(results.get("home_history"))
@@ -5169,6 +5326,14 @@ def _run_match_pipeline(
                 )
             except Exception as e:
                 print(f"[MatchPrep] Error saving to Supabase: {e}")
+
+            # Auto-save each team's data separately for reuse
+            try:
+                tournament = config.get("tournament", "")
+                _auto_save_team_from_match(home_team, tournament, results, "home")
+                _auto_save_team_from_match(away_team, tournament, results, "away")
+            except Exception as e:
+                print(f"[MatchPrep] Error auto-saving team data: {e}")
         except Exception as e:
             # Save whatever partial results we have so user can resume
             if partial_results:
@@ -5243,6 +5408,12 @@ def _render_roster_players(roster: list, expand_key: str = "roster") -> None:
             label = f"#{number} {p['name']}" if number else p["name"]
             with st.expander(label, expanded=expand_all):
                 st.markdown(p.get("text", ""))
+                # Show opponent connections if present (segmented dossier)
+                opponent_text = p.get("opponent_text", "")
+                if opponent_text:
+                    st.markdown("---")
+                    st.markdown("**⚡ Conexiones con el rival**")
+                    st.markdown(opponent_text)
                 sources = p.get("sources", [])
                 if sources:
                     st.markdown(
