@@ -3368,6 +3368,7 @@ def run_match_preparation(
     progress_cb: Optional[Callable[[str], None]] = None,
     partial_results: Optional[Dict[str, Any]] = None,
     initial_metrics: Optional[Dict[str, Any]] = None,
+    is_womens: bool = False,
 ) -> Dict[str, Any]:
     """
     Run the full match preparation pipeline with **resumability**.
@@ -3396,17 +3397,21 @@ def run_match_preparation(
     if initial_metrics:
         _merge_workflow_metrics(workflow_metrics, initial_metrics)
 
+    womens_ctx = " (equipo femenino)" if is_womens else ""
+    research_home = f"{home_team}{womens_ctx}"
+    research_away = f"{away_team}{womens_ctx}"
+
     # Phase 1: team histories in parallel (skip if already done)
     need_home_hist = not _has_data(results.get("home_history"))
     need_away_hist = not _has_data(results.get("away_history"))
     if need_home_hist or need_away_hist:
-        _cb(f"📊 Investigando historial de **{home_team}** y **{away_team}**...")
+        _cb(f"📊 Investigando historial de **{research_home}** y **{research_away}**...")
         with ThreadPoolExecutor(max_workers=2) as executor:
             futures = {}
             if need_home_hist:
-                futures[executor.submit(_research_team_history, home_team, api_key)] = "home_history"
+                futures[executor.submit(_research_team_history, research_home, api_key)] = "home_history"
             if need_away_hist:
-                futures[executor.submit(_research_team_history, away_team, api_key)] = "away_history"
+                futures[executor.submit(_research_team_history, research_away, api_key)] = "away_history"
             for future in as_completed(futures):
                 key = futures[future]
                 try:
@@ -3429,13 +3434,13 @@ def run_match_preparation(
     need_home_coach = not _has_data(results.get("home_coach"))
     need_away_coach = not _has_data(results.get("away_coach"))
     if need_home_coach or need_away_coach:
-        _cb(f"🎯 Investigando entrenadores de **{home_team}** y **{away_team}**...")
+        _cb(f"🎯 Investigando entrenadores de **{research_home}** y **{research_away}**...")
         with ThreadPoolExecutor(max_workers=2) as executor:
             coach_futures = {}
             if need_home_coach:
-                coach_futures[executor.submit(_research_coach, home_team, api_key)] = "home_coach"
+                coach_futures[executor.submit(_research_coach, research_home, api_key, is_womens=is_womens)] = "home_coach"
             if need_away_coach:
-                coach_futures[executor.submit(_research_coach, away_team, api_key)] = "away_coach"
+                coach_futures[executor.submit(_research_coach, research_away, api_key, is_womens=is_womens)] = "away_coach"
             for future in as_completed(coach_futures):
                 key = coach_futures[future]
                 try:
@@ -3456,11 +3461,11 @@ def run_match_preparation(
 
     # Phase 2: rosters — player by player (skip if already done)
     if not _has_data(results.get("home_roster")):
-        _cb(f"👥 Investigando plantilla de **{home_team}** jugador por jugador...")
+        _cb(f"👥 Investigando plantilla de **{research_home}** jugador por jugador...")
         try:
             results["home_roster"] = _research_team_roster(
-                home_team,
-                away_team,
+                research_home,
+                research_away,
                 api_key,
                 progress_cb=_cb,
                 workflow_metrics=workflow_metrics,
@@ -3472,8 +3477,8 @@ def run_match_preparation(
     elif _roster_has_failures(results.get("home_roster", [])):
         results["home_roster"] = _retry_failed_roster_players(
             results["home_roster"],
-            home_team,
-            away_team,
+            research_home,
+            research_away,
             api_key,
             progress_cb=_cb,
             workflow_metrics=workflow_metrics,
@@ -3483,11 +3488,11 @@ def run_match_preparation(
         _cb(f"✅ Plantilla de **{home_team}** ya disponible — reutilizando.")
 
     if not _has_data(results.get("away_roster")):
-        _cb(f"👥 Investigando plantilla de **{away_team}** jugador por jugador...")
+        _cb(f"👥 Investigando plantilla de **{research_away}** jugador por jugador...")
         try:
             results["away_roster"] = _research_team_roster(
-                away_team,
-                home_team,
+                research_away,
+                research_home,
                 api_key,
                 progress_cb=_cb,
                 workflow_metrics=workflow_metrics,
@@ -3495,19 +3500,19 @@ def run_match_preparation(
             )
         except Exception as e:
             results["away_roster"] = []
-            _cb(f"❌ Error con plantilla de {away_team}: {e}")
+            _cb(f"❌ Error con plantilla de {research_away}: {e}")
     elif _roster_has_failures(results.get("away_roster", [])):
         results["away_roster"] = _retry_failed_roster_players(
             results["away_roster"],
-            away_team,
-            home_team,
+            research_away,
+            research_home,
             api_key,
             progress_cb=_cb,
             workflow_metrics=workflow_metrics,
             step_prefix="match_prep.away_roster",
         )
     else:
-        _cb(f"✅ Plantilla de **{away_team}** ya disponible — reutilizando.")
+        _cb(f"✅ Plantilla de **{research_away}** ya disponible — reutilizando.")
 
     # Phase 3: Palomo phrases (skip if already done)
     if not _has_data(results.get("palomo_phrases")):
@@ -3982,6 +3987,7 @@ def run_national_match_prep(
     api_key: str,
     progress_cb: Optional[Callable[[str], None]] = None,
     partial_results: Optional[Dict[str, Any]] = None,
+    is_womens: bool = False,
 ) -> Dict[str, Any]:
     """Run national team match preparation: analysis + head-to-head + both rosters."""
     _cb = progress_cb or (lambda _msg: None)
@@ -3994,6 +4000,10 @@ def run_national_match_prep(
     }
     workflow_metrics = _ensure_workflow_metrics(results, "national_match_prep")
 
+    womens_ctx = " (selección femenina)" if is_womens else ""
+    research_home = f"{home_country}{womens_ctx}"
+    research_away = f"{away_country}{womens_ctx}"
+
     match_prompt = _NATIONAL_MATCH_PREP_PROMPT.format(
         home_country=home_country,
         away_country=away_country,
@@ -4004,13 +4014,13 @@ def run_national_match_prep(
 
     # Phase 1: combined match analysis (home + away + head-to-head in one call)
     if not _has_data(results.get("home_history")):
-        _cb(f"📊 Analizando partido **{home_country} vs {away_country}**...")
+        _cb(f"📊 Analizando partido **{research_home} vs {research_away}**...")
         try:
             results["home_history"] = _gemini_request(
                 api_key=api_key,
                 system_prompt=match_prompt,
                 user_message=(
-                    f"Crea la preparación COMPLETA para {home_country} vs {away_country} "
+                    f"Crea la preparación COMPLETA para {research_home} vs {research_away} "
                     f"({match_type} — {tournament}). Incluye historial, análisis táctico de ambas "
                     "selecciones, jugadores clave, bajas, claves tácticas y frases Palomo."
                 ),
@@ -4021,7 +4031,7 @@ def run_national_match_prep(
                 "national_match_prep.match_analysis",
                 "Análisis del partido",
                 tokens,
-                entity=f"{home_country} vs {away_country}",
+                entity=f"{research_home} vs {research_away}",
             )
         except Exception as e:
             results["home_history"] = (f"❌ Error en análisis: {e}", [], _empty_token_usage())
@@ -4031,10 +4041,10 @@ def run_national_match_prep(
 
     # Phase 2: home roster
     if not _has_data(results.get("home_roster")):
-        _cb(f"👥 Investigando convocatoria de **{home_country}**...")
+        _cb(f"👥 Investigando convocatoria de **{research_home}**...")
         try:
             results["home_roster"] = _research_national_roster(
-                home_country,
+                research_home,
                 api_key,
                 progress_cb=_cb,
                 workflow_metrics=workflow_metrics,
@@ -4042,27 +4052,27 @@ def run_national_match_prep(
             )
         except Exception as e:
             results["home_roster"] = []
-            _cb(f"❌ Error con convocatoria de {home_country}: {e}")
+            _cb(f"❌ Error con convocatoria de {research_home}: {e}")
     elif _roster_has_failures(results.get("home_roster", [])):
         results["home_roster"] = _retry_failed_roster_players(
             results["home_roster"],
-            home_country,
-            away_country,
+            research_home,
+            research_away,
             api_key,
             progress_cb=_cb,
-            research_fn=lambda player: _research_national_player_solo(player, home_country, api_key),
+            research_fn=lambda player: _research_national_player_solo(player, research_home, api_key),
             workflow_metrics=workflow_metrics,
             step_prefix="national_match_prep.home_roster",
         )
     else:
-        _cb(f"✅ Convocatoria de **{home_country}** ya disponible — reutilizando.")
+        _cb(f"✅ Convocatoria de **{research_home}** ya disponible — reutilizando.")
 
     # Phase 3: away roster
     if not _has_data(results.get("away_roster")):
-        _cb(f"👥 Investigando convocatoria de **{away_country}**...")
+        _cb(f"👥 Investigando convocatoria de **{research_away}**...")
         try:
             results["away_roster"] = _research_national_roster(
-                away_country,
+                research_away,
                 api_key,
                 progress_cb=_cb,
                 workflow_metrics=workflow_metrics,
@@ -4070,20 +4080,20 @@ def run_national_match_prep(
             )
         except Exception as e:
             results["away_roster"] = []
-            _cb(f"❌ Error con convocatoria de {away_country}: {e}")
+            _cb(f"❌ Error con convocatoria de {research_away}: {e}")
     elif _roster_has_failures(results.get("away_roster", [])):
         results["away_roster"] = _retry_failed_roster_players(
             results["away_roster"],
-            away_country,
-            home_country,
+            research_away,
+            research_home,
             api_key,
             progress_cb=_cb,
-            research_fn=lambda player: _research_national_player_solo(player, away_country, api_key),
+            research_fn=lambda player: _research_national_player_solo(player, research_away, api_key),
             workflow_metrics=workflow_metrics,
             step_prefix="national_match_prep.away_roster",
         )
     else:
-        _cb(f"✅ Convocatoria de **{away_country}** ya disponible — reutilizando.")
+        _cb(f"✅ Convocatoria de **{research_away}** ya disponible — reutilizando.")
 
     return results
 
@@ -5017,6 +5027,12 @@ def _render_match_prep(api_key: str) -> None:
             key="mp_stadium",
         )
 
+    is_womens = st.toggle(
+        "♀️ Fútbol Femenino",
+        key="mp_is_womens",
+        help="Activa para investigar equipos femeninos",
+    )
+
     can_submit = bool(home_team and away_team)
 
     if st.button(
@@ -5084,6 +5100,7 @@ def _render_match_prep(api_key: str) -> None:
             "tournament": tournament,
             "match_type": match_type,
             "stadium": stadium,
+            "is_womens": is_womens,
         }
 
         _run_match_pipeline(
@@ -5127,6 +5144,7 @@ def _run_match_pipeline(
                 progress_cb=_progress,
                 partial_results=partial_results,
                 initial_metrics=initial_metrics,
+                is_womens=config.get("is_womens", False),
             )
             st.session_state.match_results = results
             st.session_state.pop("match_pdf_bytes", None)  # clear stale PDF
@@ -6007,6 +6025,12 @@ def _render_sel_match_tab(api_key: str) -> None:
             key="sel_match_type",
         )
 
+    is_womens_match = st.toggle(
+        "♀️ Fútbol Femenino",
+        key="sel_match_is_womens",
+        help="Activa para preparar partido de selecciones femeninas",
+    )
+
     can_submit = bool(home_country and away_country)
     if st.button("⚽ Preparar Partido", use_container_width=True, disabled=not can_submit,
                  type="primary", key="sel_match_submit"):
@@ -6018,6 +6042,7 @@ def _render_sel_match_tab(api_key: str) -> None:
             "away_country": away_country,
             "tournament": tournament,
             "match_type": match_type,
+            "is_womens": is_womens_match,
         }
         _run_sel_match_pipeline(st.session_state.nat_match_config, api_key)
 
@@ -6040,6 +6065,7 @@ def _run_sel_match_pipeline(config: dict, api_key: str, partial_results: Optiona
                 api_key=api_key,
                 progress_cb=_progress,
                 partial_results=partial_results,
+                is_womens=config.get("is_womens", False),
             )
             st.session_state.nat_match_results = results
             status.update(label="✅ ¡Partido preparado!", state="complete", expanded=False)
