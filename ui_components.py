@@ -162,3 +162,35 @@ def _render_roster_players(roster: list, expand_key: str = "roster") -> None:
             </script>""",
             unsafe_allow_html=True,
         )
+
+
+# ---------------------------------------------------------------------------
+# Formation images display
+# ---------------------------------------------------------------------------
+
+def _render_formations(formations: list, team_label: str = "") -> None:
+    """Render Sofascore formation screenshots with summary."""
+    if not formations:
+        return
+
+    from collections import Counter
+
+    freq = Counter(f.get("formation") or "N/A" for f in formations)
+    freq_str = ", ".join(f"**{fmt}** ({cnt}x)" for fmt, cnt in freq.most_common())
+    header = f"⚽ Parado Táctico — {team_label}" if team_label else "⚽ Parado Táctico"
+    st.markdown(f"### {header}")
+    st.markdown(f"Formaciones recientes: {freq_str}")
+
+    cols = st.columns(min(len(formations), 3))
+    for idx, fm in enumerate(formations):
+        with cols[idx % len(cols)]:
+            img = fm.get("image_bytes")
+            if img:
+                caption = (
+                    f"{fm.get('target_team', '')} vs {fm.get('opponent', '')} "
+                    f"({fm.get('match_date', '?')}) — {fm.get('formation', 'N/A')}"
+                )
+                st.image(img, caption=caption, use_container_width=True)
+            with st.expander(f"Jugadores — {fm.get('formation', 'N/A')}"):
+                for p in fm.get("players", []):
+                    st.markdown(f"- {p}")

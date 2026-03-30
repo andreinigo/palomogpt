@@ -43,7 +43,7 @@ from research import (
     run_player_research,
     run_team_research,
 )
-from ui_components import _render_roster_players, _render_workflow_metrics
+from ui_components import _render_formations, _render_roster_players, _render_workflow_metrics
 
 
 # ---------------------------------------------------------------------------
@@ -448,6 +448,16 @@ def _display_match_results(config: dict, results: dict) -> None:
         with st.expander("📚 Fuentes"):
             st.markdown(_format_sources(p_srcs).replace(_CITATION_SEPARATOR, ""))
 
+    # Formations
+    home_fm = results.get("home_formations", [])
+    away_fm = results.get("away_formations", [])
+    if home_fm or away_fm:
+        st.markdown("---")
+        if home_fm:
+            _render_formations(home_fm, team_label=home)
+        if away_fm:
+            _render_formations(away_fm, team_label=away)
+
 
 # ---------------------------------------------------------------------------
 # Team Research
@@ -639,6 +649,12 @@ def _display_team_research_results(config: dict, results: dict) -> None:
     st.markdown("---")
     st.markdown("### 👥 Plantilla — Dossier por Jugador")
     _render_roster_players(results.get("roster", []), expand_key=f"team_{config.get('team_name', 'team')}")
+
+    # Formations
+    team_fm = results.get("formations", [])
+    if team_fm:
+        st.markdown("---")
+        _render_formations(team_fm, team_label=team)
 
 
 # ---------------------------------------------------------------------------

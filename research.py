@@ -39,6 +39,49 @@ from database import _find_existing_team_research
 
 
 # ---------------------------------------------------------------------------
+# Sofascore formation crawler helper
+# ---------------------------------------------------------------------------
+
+def _crawl_formations(team_name: str, limit: int = 5) -> list[dict]:
+    """Crawl recent formations from Sofascore. Returns list of dicts with
+    formation, players, and image_bytes.  Non-blocking: returns [] on any error."""
+    import tempfile, shutil
+    try:
+        from sofascore_formations_crawler import crawl_team_lineups, MatchLineup
+        from dataclasses import asdict
+        from pathlib import Path
+    except ImportError:
+        return []
+    tmp_dir = None
+    try:
+        tmp_dir = Path(tempfile.mkdtemp(prefix="formations_"))
+        lineups = crawl_team_lineups(
+            team_query=team_name,
+            limit=limit,
+            output_dir=tmp_dir,
+            headless=True,
+        )
+        results: list[dict] = []
+        for lu in lineups:
+            entry = asdict(lu)
+            img_path = Path(entry.get("image_path", ""))
+            if img_path.exists():
+                entry["image_bytes"] = img_path.read_bytes()
+            else:
+                entry["image_bytes"] = None
+            entry.pop("image_path", None)
+            entry.pop("raw_image_path", None)
+            results.append(entry)
+        return results
+    except Exception as exc:
+        print(f"[formations] Error crawling {team_name}: {exc}")
+        return []
+    finally:
+        if tmp_dir and tmp_dir.exists():
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
 # Position labels
 # ---------------------------------------------------------------------------
 
@@ -785,6 +828,14 @@ def run_match_preparation(
     else:
         _cb("✅ Frases de Palomo ya disponibles — reutilizando.")
 
+    # --- Formations (Sofascore) ---
+    if not results.get("home_formations"):
+        _cb(f"⚽ Buscando formaciones recientes de **{home_team}**…")
+        results["home_formations"] = _crawl_formations(home_team, limit=5)
+    if not results.get("away_formations"):
+        _cb(f"⚽ Buscando formaciones recientes de **{away_team}**…")
+        results["away_formations"] = _crawl_formations(away_team, limit=5)
+
     return results
 
 
@@ -865,6 +916,11 @@ def run_team_research(
         )
     else:
         _cb(f"✅ Plantilla de **{research_name}** ya disponible — reutilizando.")
+
+    # --- Formations (Sofascore) ---
+    if not results.get("formations"):
+        _cb(f"⚽ Buscando formaciones recientes de **{research_name}**…")
+        results["formations"] = _crawl_formations(research_name, limit=5)
 
     return results
 
@@ -1103,6 +1159,11 @@ def run_national_team_research(
     else:
         _cb(f"✅ Convocatoria de **{country}** ya disponible — reutilizando.")
 
+    # --- Formations (Sofascore) ---
+    if not results.get("formations"):
+        _cb(f"⚽ Buscando formaciones recientes de **{country}**…")
+        results["formations"] = _crawl_formations(country, limit=5)
+
     return results
 
 
@@ -1207,6 +1268,14 @@ def run_national_match_prep(
         )
     else:
         _cb(f"✅ Convocatoria de **{research_away}** ya disponible — reutilizando.")
+
+    # --- Formations (Sofascore) ---
+    if not results.get("home_formations"):
+        _cb(f"⚽ Buscando formaciones recientes de **{research_home}**…")
+        results["home_formations"] = _crawl_formations(research_home, limit=5)
+    if not results.get("away_formations"):
+        _cb(f"⚽ Buscando formaciones recientes de **{research_away}**…")
+        results["away_formations"] = _crawl_formations(research_away, limit=5)
 
     return results
 

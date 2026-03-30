@@ -34,7 +34,7 @@ from research import (
     run_national_player_research,
     run_national_team_research,
 )
-from ui_components import _render_roster_players, _render_workflow_metrics
+from ui_components import _render_formations, _render_roster_players, _render_workflow_metrics
 
 
 # ---------------------------------------------------------------------------
@@ -189,6 +189,12 @@ def _display_sel_team_results(config: dict, results: dict) -> None:
         st.markdown("---")
         st.markdown("### 🎽 Convocatoria — Dossier por Jugador")
         _render_roster_players(roster, expand_key=f"sel_{config.get('country', 'sel')}")
+
+    # Formations
+    team_fm = results.get("formations", [])
+    if team_fm:
+        st.markdown("---")
+        _render_formations(team_fm, team_label=country)
 
 
 # ---------------------------------------------------------------------------
@@ -363,6 +369,16 @@ def _display_sel_match_results(config: dict, results: dict) -> None:
         st.markdown("---")
         st.markdown(f"### ✈️ Convocatoria de **{away}**")
         _render_roster_players(away_roster, expand_key=f"nmp_away_{config.get('away_country', 'a')}")
+
+    # Formations
+    home_fm = results.get("home_formations", [])
+    away_fm = results.get("away_formations", [])
+    if home_fm or away_fm:
+        st.markdown("---")
+        if home_fm:
+            _render_formations(home_fm, team_label=home)
+        if away_fm:
+            _render_formations(away_fm, team_label=away)
 
 
 # ---------------------------------------------------------------------------
