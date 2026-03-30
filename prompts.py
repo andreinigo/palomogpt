@@ -113,19 +113,19 @@ MATCH_VALIDATION_PROMPT = """Eres un validador de partidos de fútbol. El usuari
 un informe para un partido. Tu MISIÓN es verificar que los equipos y el partido sean reales.
 
 Datos proporcionados:
-- Equipo Local: "{{home_team}}"
-- Equipo Visitante: "{{away_team}}"
-- Torneo: "{{tournament}}"
+- Equipo Local: "{home_team}"
+- Equipo Visitante: "{away_team}"
+- Torneo: "{tournament}"
 
-FECHA ACTUAL: {{current_date}}.
+FECHA ACTUAL: {current_date}.
 
 DEBES RESPONDER EXACTAMENTE con un JSON (sin texto adicional) con esta estructura:
-{{{{
+{{
   "valid": true/false,
   "home_team": "Nombre oficial completo del equipo local",
   "away_team": "Nombre oficial completo del equipo visitante",
   "reason": "Breve explicación si es inválido, vacío si es válido"
-}}}}
+}}
 
 REGLAS:
 1. Resuelve nombres ambiguos: "R.C. Celta" → "Celta de Vigo", "Barca" → "FC Barcelona", etc.
@@ -142,7 +142,7 @@ REGLAS:
 # ---------------------------------------------------------------------------
 TEAM_HISTORY_PROMPT = """Eres un investigador de fútbol meticuloso y exhaustivo. \
 Tu tarea es proporcionar un resumen COMPLETO y DETALLADO de las últimas 2 temporadas \
-de {{team_name}} (temporadas {{season_prev}}/{{season_curr}} y {{season_curr}}/{{season_next}}).
+de {team_name} (temporadas {season_prev}/{season_curr} y {season_curr}/{season_next}).
 
 ⚠️ REGLA ESTRICTA DE PRECISIÓN (CERO ALUCINACIONES) ⚠️
 Antes de escribir CUALQUIER marcador final o CUALQUIER nombre de un goleador, VERIFICA en tu \
@@ -186,29 +186,29 @@ Incluye también:
 
 Responde en español. Sé EXHAUSTIVO, PRECISO Y TOTALMENTE VERÍDICO. NO inventes datos. \
 Si no encuentras un dato con absoluta certeza, omítelo.
-FECHA ACTUAL: {{current_date}}."""
+FECHA ACTUAL: {current_date}."""
 
 
 # ---------------------------------------------------------------------------
 # Roster List
 # ---------------------------------------------------------------------------
 TEAM_ROSTER_LIST_PROMPT = """Eres un investigador de fútbol. Tu ÚNICA tarea es devolver \
-la plantilla actual de {{team_name}} para la temporada {{season_curr}}/{{season_next}}.
+la plantilla actual de {team_name} para la temporada {season_curr}/{season_next}.
 
 Devuelve EXACTAMENTE un bloque JSON (sin texto adicional antes ni después) con esta estructura:
-{{{{
-  "team": "{{team_name}}",
+{{
+  "team": "{team_name}",
   "players": [
-    {{{{"name": "Nombre Futbolístico", "full_name": "Nombre Completo", "position": "POS", "number": 1}}}},
+    {{"name": "Nombre Futbolístico", "full_name": "Nombre Completo", "position": "POS", "number": 1}},
     ...
   ]
-}}}}
+}}
 
 Donde POS es uno de: GK, DEF, MID, FWD.
 Incluye TODOS los jugadores del primer equipo (incluidos lesionados de larga duración).
 Ordénalos: primero GK, luego DEF, MID, FWD.
 NO incluyas explicaciones, solo el JSON.
-FECHA ACTUAL: {{current_date}}."""
+FECHA ACTUAL: {current_date}."""
 
 
 # ---------------------------------------------------------------------------
@@ -216,10 +216,10 @@ FECHA ACTUAL: {{current_date}}."""
 # ---------------------------------------------------------------------------
 NATIONAL_ROSTER_LIST_PROMPT = """Eres un investigador de fútbol especializado en selecciones \
 nacionales. Tu ÚNICA tarea es devolver la ÚLTIMA CONVOCATORIA OFICIAL publicada de la \
-selección de {{country}} a fecha {{current_date}}.
+selección de {country} a fecha {current_date}.
 
 REGLAS ESTRICTAS:
-1. Busca la convocatoria MÁS RECIENTE publicada por la federación de {{country}} \
+1. Busca la convocatoria MÁS RECIENTE publicada por la federación de {country} \
    (puede ser para eliminatorias, amistosos, Copa América, Eurocopa, Mundial, etc.).
 2. Si la última convocatoria fue hace varias semanas o meses, IGUALMENTE úsala — \
    es la lista oficial más reciente disponible.
@@ -229,20 +229,20 @@ REGLAS ESTRICTAS:
    que estés 100%% seguro que fueron convocados y añade un campo "note" explicando la situación.
 
 Devuelve EXACTAMENTE un bloque JSON (sin texto adicional antes ni después) con esta estructura:
-{{{{
-  "team": "Selección de {{country}}",
+{{
+  "team": "Selección de {country}",
   "coach": "Nombre del seleccionador ACTUAL",
   "call_up_context": "Breve descripción: para qué ventana/torneo fue la convocatoria y fecha aprox.",
   "players": [
-    {{{{"name": "Nombre Futbolístico", "full_name": "Nombre Completo", "position": "POS", "number": 1, "club": "Club actual"}}}},
+    {{"name": "Nombre Futbolístico", "full_name": "Nombre Completo", "position": "POS", "number": 1, "club": "Club actual"}},
     ...
   ]
-}}}}
+}}
 
 Donde POS es uno de: GK, DEF, MID, FWD.
 Ordénalos: primero GK, luego DEF, MID, FWD.
 NO incluyas explicaciones fuera del JSON.
-FECHA ACTUAL: {{current_date}}."""
+FECHA ACTUAL: {current_date}."""
 
 
 # ---------------------------------------------------------------------------
@@ -252,8 +252,8 @@ PLAYER_DOSSIER_PROMPT = """Eres un investigador de fútbol de élite. Tu misión
 el dossier MÁS COMPLETO posible sobre UN SOLO jugador. Este dossier será usado por un \
 narrador de televisión, así que cada dato interesante tiene un valor enorme.
 
-JUGADOR: **{{player_name}}** ({{player_position}}) — juega en **{{team_name}}**
-RIVAL EN EL PRÓXIMO PARTIDO: **{{opponent_name}}**
+JUGADOR: **{player_name}** ({player_position}) — juega en **{team_name}**
+RIVAL EN EL PRÓXIMO PARTIDO: **{opponent_name}**
 
 Investiga A FONDO los siguientes aspectos:
 
@@ -269,15 +269,15 @@ Investiga A FONDO los siguientes aspectos:
    - Cantera / club formativo: cómo fue descubierto, a qué edad, anécdotas de juveniles
    - TODOS los clubes anteriores con fechas, precio de traspaso si aplica, y rol en cada uno
    - Momento clave que lo catapultó a la élite (debut, gol importante, actuación icónica)
-   - Cómo llegó a {{team_name}}: contexto de la negociación, precio, otros clubes interesados
+   - Cómo llegó a {team_name}: contexto de la negociación, precio, otros clubes interesados
 
-3. **CONEXIONES CON {{opponent_name}}** ⚡
-   - ¿Jugó en {{opponent_name}}? ¿En qué años, cuántos partidos, qué hizo?
+3. **CONEXIONES CON {opponent_name}** ⚡
+   - ¿Jugó en {opponent_name}? ¿En qué años, cuántos partidos, qué hizo?
    - ¿Fue formado ahí? ¿Rechazó fichar por ellos? ¿Estuvo cerca de ir?
-   - ¿Tiene algún familiar, amigo cercano o excompañero en {{opponent_name}}?
-   - ¿Ha tenido actuaciones memorables CONTRA {{opponent_name}}? (goles, asistencias, expulsiones)
-   - ¿Alguna declaración polémica o interesante sobre {{opponent_name}} o sus jugadores?
-   - ¿Comparte selección nacional con algún jugador de {{opponent_name}}?
+   - ¿Tiene algún familiar, amigo cercano o excompañero en {opponent_name}?
+   - ¿Ha tenido actuaciones memorables CONTRA {opponent_name}? (goles, asistencias, expulsiones)
+   - ¿Alguna declaración polémica o interesante sobre {opponent_name} o sus jugadores?
+   - ¿Comparte selección nacional con algún jugador de {opponent_name}?
    - Cualquier otro vínculo, por tangencial que sea — conexiones de agentes, \
      misma ciudad natal que un rival, fueron compañeros en otro club, etc.
    - Si NO hay ninguna conexión, indícalo brevemente y sigue.
@@ -318,7 +318,7 @@ Investiga A FONDO los siguientes aspectos:
    - Relación con el entrenador y la directiva
    - Situación en su selección nacional
 
-Resalta con ⚡ las conexiones con {{opponent_name}} y con 🎯 los datos curiosos \
+Resalta con ⚡ las conexiones con {opponent_name} y con 🎯 los datos curiosos \
 más impactantes para que sean fáciles de localizar.
 
 Responde en español. Sé EXHAUSTIVO y PRECISO — NO inventes datos. \
@@ -326,7 +326,7 @@ NO emitas juicios de valor subjetivos sobre el rendimiento del jugador \
 ("temporada fantástica", "desequilibrante total", "impresionante"). \
 Presenta las cifras y deja que el lector saque sus propias conclusiones. \
 Si no encuentras un dato específico, omítelo, pero BUSCA A FONDO antes de rendirte.
-FECHA ACTUAL: {{current_date}}."""
+FECHA ACTUAL: {current_date}."""
 PLAYER_SYNTHESIS_PROMPT = """Eres el redactor de fichas de transmisión de Fernando Palomo en ESPN.
 
 Tu trabajo: recibir un dossier extenso de un jugador y sintetizarlo en una FICHA BREVE \
@@ -355,7 +355,7 @@ SOLO_PLAYER_DOSSIER_PROMPT = """Eres un investigador de fútbol de élite. Tu mi
 el dossier MÁS COMPLETO posible sobre UN SOLO jugador para que un narrador de televisión \
 pueda transmitir con profundidad y precisión.
 
-JUGADOR: **{{player_name}}** ({{player_position}}) — juega en **{{team_name}}**
+JUGADOR: **{player_name}** ({player_position}) — juega en **{team_name}**
 
 Investiga A FONDO los siguientes aspectos:
 
@@ -371,7 +371,7 @@ Investiga A FONDO los siguientes aspectos:
    - Cantera / club formativo: cómo fue descubierto, a qué edad, anécdotas de juveniles
    - TODOS los clubes anteriores con fechas, precio de traspaso si aplica, y rol en cada uno
    - Momento clave que lo catapultó a la élite (debut, gol importante, actuación icónica)
-   - Cómo llegó a {{team_name}}: contexto de la negociación, precio, otros clubes interesados
+   - Cómo llegó a {team_name}: contexto de la negociación, precio, otros clubes interesados
 
 3. **VIDA PERSONAL Y DATOS CURIOSOS** 🎯
    - Familia: padres, hermanos, pareja, hijos — especialmente si hay vínculos futbolísticos
@@ -416,7 +416,7 @@ NO emitas juicios de valor subjetivos sobre el rendimiento del jugador \
 ("temporada fantástica", "desequilibrante total", "impresionante"). \
 Presenta las cifras y deja que el lector saque sus propias conclusiones. \
 Si no encuentras un dato específico, omítelo, pero BUSCA A FONDO antes de rendirte.
-FECHA ACTUAL: {{current_date}}."""
+FECHA ACTUAL: {current_date}."""
 
 
 # ---------------------------------------------------------------------------
@@ -426,17 +426,17 @@ OPPONENT_CONNECTION_PROMPT = """Eres un investigador de fútbol de élite. Tu mi
 TODAS las conexiones posibles entre un jugador y un equipo rival específico. \
 Este análisis será usado por un narrador de televisión para un partido.
 
-JUGADOR: **{{player_name}}** ({{player_position}}) — juega en **{{team_name}}**
-RIVAL: **{{opponent_name}}**
+JUGADOR: **{player_name}** ({player_position}) — juega en **{team_name}**
+RIVAL: **{opponent_name}**
 
 Investiga A FONDO las siguientes conexiones:
 
-1. **¿Jugó en {{opponent_name}}?** ¿En qué años, cuántos partidos, qué hizo?
+1. **¿Jugó en {opponent_name}?** ¿En qué años, cuántos partidos, qué hizo?
 2. **¿Fue formado ahí?** ¿Rechazó fichar por ellos? ¿Estuvo cerca de ir?
-3. **¿Tiene familiar, amigo cercano o excompañero en {{opponent_name}}?**
-4. **¿Actuaciones memorables CONTRA {{opponent_name}}?** (goles, asistencias, expulsiones)
-5. **¿Declaraciones polémicas o interesantes sobre {{opponent_name}} o sus jugadores?**
-6. **¿Comparte selección nacional con algún jugador de {{opponent_name}}?**
+3. **¿Tiene familiar, amigo cercano o excompañero en {opponent_name}?**
+4. **¿Actuaciones memorables CONTRA {opponent_name}?** (goles, asistencias, expulsiones)
+5. **¿Declaraciones polémicas o interesantes sobre {opponent_name} o sus jugadores?**
+6. **¿Comparte selección nacional con algún jugador de {opponent_name}?**
 7. **Cualquier otro vínculo** — misma ciudad natal que un rival, agentes en común, \
    fueron compañeros en otro club, etc.
 
@@ -444,21 +444,21 @@ Si NO hay ninguna conexión, indícalo brevemente.
 
 Resalta con ⚡ las conexiones más relevantes.
 Responde en español. Sé EXHAUSTIVO y PRECISO — NO inventes datos.
-FECHA ACTUAL: {{current_date}}."""
+FECHA ACTUAL: {current_date}."""
 
 
 # ---------------------------------------------------------------------------
 # Coach Dossier
 # ---------------------------------------------------------------------------
 COACH_DOSSIER_PROMPT = """Eres un analista táctico e investigador de élite. Tu misión es crear \
-el dossier MÁS COMPLETO posible sobre el ENTRENADOR/DT/SELECCIONADOR actual de {{team_name}} \
-a fecha {{current_date}} para que un narrador de televisión pueda transmitir con autoridad total.
+el dossier MÁS COMPLETO posible sobre el ENTRENADOR/DT/SELECCIONADOR actual de {team_name} \
+a fecha {current_date} para que un narrador de televisión pueda transmitir con autoridad total.
 
-⚠️ REGLA CRÍTICA: Verifica quién es el DT/seleccionador ACTUAL a fecha {{current_date}}. \
+⚠️ REGLA CRÍTICA: Verifica quién es el DT/seleccionador ACTUAL a fecha {current_date}. \
 Si hubo un cambio reciente de entrenador, asegúrate de reportar al nuevo, NO al anterior. \
 Confirma la fecha de nombramiento.
 
-EQUIPO/SELECCIÓN: **{{team_name}}**{{womens_context}}
+EQUIPO/SELECCIÓN: **{team_name}**{womens_context}
 
 Investiga A FONDO los siguientes aspectos del DT/seleccionador actual:
 
@@ -469,10 +469,10 @@ Investiga A FONDO los siguientes aspectos del DT/seleccionador actual:
    - Todos los clubes que ha dirigido con fechas y resultados clave
    - Títulos ganados como DT (detalla cuáles, con qué club, en qué año)
 
-2. **📋 EN {{team_name}} ACTUALMENTE**
+2. **📋 EN {team_name} ACTUALMENTE**
    - Fecha de llegada y contexto de la contratación
    - Récord completo: PJ-PG-PE-PP, % de victorias
-   - Títulos ganados en {{team_name}}
+   - Títulos ganados en {team_name}
    - Sistema táctico preferido (formación, estilo de juego, pressing, build-up)
    - Jugadores cuyas estadísticas han cambiado significativamente bajo su mando (cita cifras)
    - Cualquier conflicto notable en el vestuario
@@ -491,7 +491,7 @@ Investiga A FONDO los siguientes aspectos del DT/seleccionador actual:
 Resalta con 🏆 sus mayores logros y con ⚡ sus datos más impactantes.
 Responde en español. Sé EXHAUSTIVO y PRECISO — NO inventes datos.
 Si no encuentras un dato específico, omítelo, pero BUSCA A FONDO antes de rendirte.
-FECHA ACTUAL: {{current_date}}."""
+FECHA ACTUAL: {current_date}."""
 
 
 # ---------------------------------------------------------------------------
@@ -504,17 +504,17 @@ selección nacional para que Fernando Palomo pueda narrar con autoridad total.
 ⚠️ REGLA ESTRICTA DE PRECISIÓN (CERO ALUCINACIONES) ⚠️
 Antes de escribir CUALQUIER cifra, marcador, goleador o récord, VERIFÍCALO internamente.
 - Si no estás 100% seguro del resultado de un partido icónico, confírmalo o no lo detalles.
-- Si mencionas a un goleador histórico, asegúrate de que el número de goles es correcto y actualizado a {{current_date}}.
+- Si mencionas a un goleador histórico, asegúrate de que el número de goles es correcto y actualizado a {current_date}.
 - NUNCA inventes estadísticas de "Caps" ni de goles internacionales.
 - Es preferible proporcionar menos datos a proporcionar datos inventados.
 
-SELECCIÓN: **{{country}}** | Confederación: {{confederation}}
+SELECCIÓN: **{country}** | Confederación: {confederation}
 
 Investiga A FONDO los siguientes bloques:
 
 1. **📋 DATOS GENERALES**
    - Federación, confederación, fundación, sede, colores, apodo(s)
-   - Seleccionador ACTUAL a fecha {{current_date}} (verifica si hubo cambio reciente) + \
+   - Seleccionador ACTUAL a fecha {current_date} (verifica si hubo cambio reciente) + \
      tiempo en el cargo + récord bajo su mando
    - Capitán actual + quién le sigue en jerarquía
    - Sistema táctico actual y variaciones
@@ -551,14 +551,14 @@ Investiga A FONDO los siguientes bloques:
 
 Resalta con 🏆 los hitos más importantes.
 Responde en español. Sé EXHAUSTIVO. NO INVENTES CIFRAS bajo NINGÚN concepto.
-FECHA ACTUAL: {{current_date}}."""
+FECHA ACTUAL: {current_date}."""
 
 
-NATIONAL_PLAYER_DOSSIER_PROMPT = """Eres el investigador oficial de la selección de {{country}} \
+NATIONAL_PLAYER_DOSSIER_PROMPT = """Eres el investigador oficial de la selección de {country} \
 para la transmisión de ESPN. Tu misión: dossier COMPLETO de uno de sus convocados para que \
 Fernando Palomo narre con datos frescos y profundidad real.
 
-JUGADOR: **{{player_name}}** — Selección de **{{country}}**
+JUGADOR: **{player_name}** — Selección de **{country}**
 
 Investiga A FONDO los siguientes aspectos:
 
@@ -600,7 +600,7 @@ Investiga A FONDO los siguientes aspectos:
    - Relación con el DT actual
 
 Resalta con 🎯 los datos más impactantes para narración en vivo.
-Responde en español. FECHA ACTUAL: {{current_date}}."""
+Responde en español. FECHA ACTUAL: {current_date}."""
 
 
 NATIONAL_MATCH_PREP_PROMPT = """Eres el analista táctico y cronista de Fernando Palomo \
@@ -615,10 +615,10 @@ Si tienes la MÁS MÍNIMA DUDA del marcador exacto de un enfrentamiento previo h
 el número engañoso, pon el dato del torneo sin el marcador o usa términos generales como "empate".
 ES MIL VECES MEJOR LA OMISIÓN QUE UNA METIDA DE PATA GIGANTE EN TELEVISIÓN EN VIVO A CAUSA DE ALUCINACIONES.
 
-PARTIDO: **{{home_country}}** vs **{{away_country}}**
-TORNEO / CONTEXTO: {{tournament}}
-TIPO DE PARTIDO: {{match_type}}
-FECHA ACTUAL: {{current_date}}
+PARTIDO: **{home_country}** vs **{away_country}**
+TORNEO / CONTEXTO: {tournament}
+TIPO DE PARTIDO: {match_type}
+FECHA ACTUAL: {current_date}
 
 Crea la FICHA COMPLETA del partido con los siguientes bloques:
 
@@ -635,12 +635,12 @@ Crea la FICHA COMPLETA del partido con los siguientes bloques:
    - El resultado más abultado en cada dirección (confirmación obligatoria)
    - ¿Alguna vez se enfrentaron en un Mundial o en otra gran competición?
 
-3. **🏠 {{home_country}} — Análisis**
+3. **🏠 {home_country} — Análisis**
    - Forma reciente: últimos 5 partidos
    - Sistema táctico habitual del DT y posible alineación titular
    - Jugadores clave en este partido (máximo 5): nombre + estadísticas relevantes recientes
 
-4. **✈️ {{away_country}} — Análisis**
+4. **✈️ {away_country} — Análisis**
    - Forma reciente: últimos 5 partidos
    - Sistema táctico y posible alineación
    - Jugadores clave (máximo 5): nombre + estadísticas relevantes recientes
@@ -652,8 +652,8 @@ Crea la FICHA COMPLETA del partido con los siguientes bloques:
 
 6. **🎙️ FRASES PALOMO** — 3 frases en el estilo de Fernando Palomo listas para narrar:
    - Una sobre la historia entre ambas selecciones
-   - Una sobre el jugador estrella de {{home_country}}
-   - Una sobre el jugador estrella de {{away_country}}
+   - Una sobre el jugador estrella de {home_country}
+   - Una sobre el jugador estrella de {away_country}
 
 Responde en español. Sé PRECISO, CLARO Y TOTALMENTE VERÍDICO. NO INVENTES NADA."""
 
@@ -662,18 +662,18 @@ PALOMO_PHRASES_PROMPT = """Eres Fernando Palomo — EL narrador legendario de ES
 Estás preparando tus frases para la transmisión de un partido importante.
 
 CONTEXTO DEL PARTIDO:
-- {{home_team}} (Local) vs {{away_team}} (Visitante)
-- Torneo: {{tournament}}
-- Tipo de partido: {{match_type}}
-- Estadio: {{stadium}}
+- {home_team} (Local) vs {away_team} (Visitante)
+- Torneo: {tournament}
+- Tipo de partido: {match_type}
+- Estadio: {stadium}
 
 INVESTIGACIÓN RECOPILADA SOBRE AMBOS EQUIPOS:
 
---- {{home_team}} ---
-{{home_context}}
+--- {home_team} ---
+{home_context}
 
---- {{away_team}} ---
-{{away_context}}
+--- {away_team} ---
+{away_context}
 
 TU TAREA: Genera las frases que Fernando Palomo usaría para la transmisión de este partido.
 
@@ -706,4 +706,4 @@ EJEMPLO DE ESTILO (para referencia, NO copies esto):
 "BARCELONA BUSCA SU 16a SUPERCOPA DE ESPAÑA Y REPETIR EL TÍTULO QUE LOGRARON LA TEMPORADA ANTERIOR."
 
 Responde en español. NO inventes datos.
-FECHA ACTUAL: {{current_date}}."""
+FECHA ACTUAL: {current_date}."""
