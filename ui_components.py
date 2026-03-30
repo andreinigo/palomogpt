@@ -185,6 +185,9 @@ def _render_formations(formations: list, team_label: str = "") -> None:
     for idx, fm in enumerate(formations):
         with cols[idx % len(cols)]:
             img = fm.get("image_bytes")
+            if img and isinstance(img, str):
+                import base64
+                img = base64.b64decode(img)
             if img:
                 caption = (
                     f"{fm.get('target_team', '')} vs {fm.get('opponent', '')} "

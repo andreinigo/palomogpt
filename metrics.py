@@ -133,13 +133,23 @@ def _serialize_result_value(value: Any) -> Any:
         serialized: List[Any] = []
         for item in value:
             if isinstance(item, dict):
-                normalized_item = dict(item)
+                normalized_item = {}
+                for k, v in item.items():
+                    if isinstance(v, (bytes, bytearray)):
+                        import base64
+                        normalized_item[k] = base64.b64encode(v).decode("ascii")
+                    else:
+                        normalized_item[k] = v
                 if "tokens" in normalized_item or "text" in normalized_item:
                     normalized_item["tokens"] = _normalize_token_usage(normalized_item.get("tokens"))
                 serialized.append(normalized_item)
             else:
                 serialized.append(item)
         return serialized
+
+    if isinstance(value, (bytes, bytearray)):
+        import base64
+        return base64.b64encode(value).decode("ascii")
 
     return value
 
