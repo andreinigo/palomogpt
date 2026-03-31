@@ -701,6 +701,52 @@ def _roster_is_complete(roster: list) -> bool:
     return _REQUIRED_POSITIONS.issubset(positions)
 
 
+def _roster_gap_count(roster: list, player_list: list) -> int:
+    """Return number of players in player_list that are missing or failed in roster."""
+    existing = {
+        (e.get("name") or "").strip().lower()
+        for e in roster
+        if not e.get("text", "").startswith("❌")
+    }
+    return sum(
+        1 for p in player_list
+        if (p.get("name") or "").strip().lower() not in existing
+    )
+
+
+def fill_roster_gaps(
+    team_name: str,
+    opponent_name: str,
+    api_key: str,
+    existing_roster: List[Dict[str, Any]],
+    progress_cb: Optional[Callable[[str], None]] = None,
+    on_batch_complete: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
+    is_national: bool = False,
+) -> List[Dict[str, Any]]:
+    """Re-fetch the full player list, compare against existing_roster, and
+    research only the missing players. Returns the merged roster."""
+    if is_national:
+        return _research_national_roster(
+            team_name, api_key,
+            progress_cb=progress_cb,
+            existing_roster=existing_roster,
+            on_batch_complete=on_batch_complete,
+        )
+    if opponent_name:
+        return _research_team_roster(
+            team_name, opponent_name, api_key,
+            progress_cb=progress_cb,
+            existing_roster=existing_roster,
+            on_batch_complete=on_batch_complete,
+        )
+    return _research_team_roster_solo(
+        team_name, api_key,
+        progress_cb=progress_cb,
+        existing_roster=existing_roster,
+        on_batch_complete=on_batch_complete,
+    )
+
+
 def _retry_failed_roster_players(
     roster: List[Dict[str, Any]],
     team_name: str,

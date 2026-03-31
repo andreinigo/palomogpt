@@ -30,6 +30,7 @@ from metrics import (
 )
 from research import (
     _roster_has_failures,
+    fill_roster_gaps,
     run_national_match_prep,
     run_national_player_research,
     run_national_team_research,
@@ -200,11 +201,48 @@ def _display_sel_team_results(config: dict, results: dict) -> None:
         st.markdown("### 🎽 Convocatoria — Dossier por Jugador")
         _render_roster_players(roster, expand_key=f"sel_{config.get('country', 'sel')}")
 
+    if st.button("🔍 Completar convocatoria", key="fill_sel_roster", use_container_width=True):
+        _fill_sel_team_roster_gaps(config, results, st.secrets.get("GEMINI_API_KEY", ""))
+        return
+
     # Formations
     team_fm = results.get("formations", [])
     if team_fm:
         st.markdown("---")
         _render_formations(team_fm, team_label=country)
+
+
+def _fill_sel_team_roster_gaps(config: dict, results: dict, api_key: str) -> None:
+    """Fill missing player dossiers for a national team research."""
+    country = config["country"]
+    existing_roster = results.get("roster", [])
+    with st.status(f"🔍 Completando convocatoria de **{country}**...", expanded=True) as status:
+        def _progress(msg: str) -> None:
+            status.write(msg)
+
+        def _on_batch(partial: list) -> None:
+            results["roster"] = partial
+            st.session_state.nat_team_results = results
+            try:
+                _save_national_team_research(config, results)
+            except Exception:
+                pass
+
+        try:
+            results["roster"] = fill_roster_gaps(
+                country, "", api_key,
+                existing_roster=existing_roster,
+                progress_cb=_progress,
+                on_batch_complete=_on_batch,
+                is_national=True,
+            )
+            st.session_state.nat_team_results = results
+            _save_national_team_research(config, results)
+            status.update(label=f"✅ Convocatoria de {country} completada", state="complete")
+        except Exception as e:
+            status.update(label=f"❌ Error: {e}", state="error")
+            print(f"[FillGaps] Error:\n{traceback.format_exc()}")
+    st.rerun()
 
 
 # ---------------------------------------------------------------------------
@@ -390,6 +428,16 @@ def _display_sel_match_results(config: dict, results: dict) -> None:
         st.markdown(f"### ✈️ Convocatoria de **{away}**")
         _render_roster_players(away_roster, expand_key=f"nmp_away_{config.get('away_country', 'a')}")
 
+    col_btn_h, col_btn_a = st.columns(2)
+    with col_btn_h:
+        if st.button("🔍 Completar convocatoria local", key="fill_nmp_home", use_container_width=True):
+            _fill_sel_match_roster_gaps(config, results, "home", st.secrets.get("GEMINI_API_KEY", ""))
+            return
+    with col_btn_a:
+        if st.button("🔍 Completar convocatoria visitante", key="fill_nmp_away", use_container_width=True):
+            _fill_sel_match_roster_gaps(config, results, "away", st.secrets.get("GEMINI_API_KEY", ""))
+            return
+
     # Formations
     home_fm = results.get("home_formations", [])
     away_fm = results.get("away_formations", [])
@@ -399,6 +447,41 @@ def _display_sel_match_results(config: dict, results: dict) -> None:
             _render_formations(home_fm, team_label=home)
         if away_fm:
             _render_formations(away_fm, team_label=away)
+
+
+def _fill_sel_match_roster_gaps(config: dict, results: dict, side: str, api_key: str) -> None:
+    """Fill missing player dossiers for one side of a national match prep."""
+    roster_key = f"{side}_roster"
+    team = config.get(f"{side}_country", "?")
+    existing_roster = results.get(roster_key, [])
+
+    with st.status(f"🔍 Completando convocatoria de **{team}**...", expanded=True) as status:
+        def _progress(msg: str) -> None:
+            status.write(msg)
+
+        def _on_batch(partial: list) -> None:
+            results[roster_key] = partial
+            st.session_state.nat_match_results = results
+            try:
+                _save_national_match_prep(config, results)
+            except Exception:
+                pass
+
+        try:
+            results[roster_key] = fill_roster_gaps(
+                team, "", api_key,
+                existing_roster=existing_roster,
+                progress_cb=_progress,
+                on_batch_complete=_on_batch,
+                is_national=True,
+            )
+            st.session_state.nat_match_results = results
+            _save_national_match_prep(config, results)
+            status.update(label=f"✅ Convocatoria de {team} completada", state="complete")
+        except Exception as e:
+            status.update(label=f"❌ Error: {e}", state="error")
+            print(f"[FillGaps] Error:\n{traceback.format_exc()}")
+    st.rerun()
 
 
 # ---------------------------------------------------------------------------

@@ -39,6 +39,7 @@ from prompts import MATCH_VALIDATION_PROMPT
 from research import (
     _POS_LABELS,
     _roster_has_failures,
+    fill_roster_gaps,
     run_match_preparation,
     run_player_research,
     run_team_research,
@@ -443,6 +444,17 @@ def _display_match_results(config: dict, results: dict) -> None:
         )
         _render_roster_players(results.get("away_roster", []), expand_key=f"mp_away_{config.get('away_team', 'a')}")
 
+    # Fill roster gaps buttons
+    col_btn_h, col_btn_a = st.columns(2)
+    with col_btn_h:
+        if st.button("🔍 Completar plantilla local", key="fill_home_roster", use_container_width=True):
+            _fill_match_roster_gaps(config, results, "home", st.secrets.get("GEMINI_API_KEY", ""))
+            return
+    with col_btn_a:
+        if st.button("🔍 Completar plantilla visitante", key="fill_away_roster", use_container_width=True):
+            _fill_match_roster_gaps(config, results, "away", st.secrets.get("GEMINI_API_KEY", ""))
+            return
+
     # Palomo Phrases
     st.markdown("---")
     st.markdown(
@@ -466,6 +478,45 @@ def _display_match_results(config: dict, results: dict) -> None:
             _render_formations(home_fm, team_label=home)
         if away_fm:
             _render_formations(away_fm, team_label=away)
+
+
+def _fill_match_roster_gaps(config: dict, results: dict, side: str, api_key: str) -> None:
+    """Fill missing player dossiers for one side of a match prep."""
+    roster_key = f"{side}_roster"
+    if side == "home":
+        team = config.get("home_team", "?")
+        opponent = config.get("away_team", "?")
+    else:
+        team = config.get("away_team", "?")
+        opponent = config.get("home_team", "?")
+
+    existing_roster = results.get(roster_key, [])
+    with st.status(f"🔍 Completando plantilla de **{team}**...", expanded=True) as status:
+        def _progress(msg: str) -> None:
+            status.write(msg)
+
+        def _on_batch(partial: list) -> None:
+            results[roster_key] = partial
+            st.session_state.match_results = results
+            try:
+                _save_match_prep(config, results)
+            except Exception:
+                pass
+
+        try:
+            results[roster_key] = fill_roster_gaps(
+                team, opponent, api_key,
+                existing_roster=existing_roster,
+                progress_cb=_progress,
+                on_batch_complete=_on_batch,
+            )
+            st.session_state.match_results = results
+            _save_match_prep(config, results)
+            status.update(label=f"✅ Plantilla de {team} completada", state="complete")
+        except Exception as e:
+            status.update(label=f"❌ Error: {e}", state="error")
+            print(f"[FillGaps] Error:\n{traceback.format_exc()}")
+    st.rerun()
 
 
 # ---------------------------------------------------------------------------
@@ -668,11 +719,47 @@ def _display_team_research_results(config: dict, results: dict) -> None:
     st.markdown("### 👥 Plantilla — Dossier por Jugador")
     _render_roster_players(results.get("roster", []), expand_key=f"team_{config.get('team_name', 'team')}")
 
+    if st.button("🔍 Completar plantilla", key="fill_team_roster", use_container_width=True):
+        _fill_team_roster_gaps(config, results, st.secrets.get("GEMINI_API_KEY", ""))
+        return
+
     # Formations
     team_fm = results.get("formations", [])
     if team_fm:
         st.markdown("---")
         _render_formations(team_fm, team_label=team)
+
+
+def _fill_team_roster_gaps(config: dict, results: dict, api_key: str) -> None:
+    """Fill missing player dossiers for a team research."""
+    team = config["team_name"]
+    existing_roster = results.get("roster", [])
+    with st.status(f"🔍 Completando plantilla de **{team}**...", expanded=True) as status:
+        def _progress(msg: str) -> None:
+            status.write(msg)
+
+        def _on_batch(partial: list) -> None:
+            results["roster"] = partial
+            st.session_state.team_research_results = results
+            try:
+                _save_team_research(config, results)
+            except Exception:
+                pass
+
+        try:
+            results["roster"] = fill_roster_gaps(
+                team, "", api_key,
+                existing_roster=existing_roster,
+                progress_cb=_progress,
+                on_batch_complete=_on_batch,
+            )
+            st.session_state.team_research_results = results
+            _save_team_research(config, results)
+            status.update(label=f"✅ Plantilla de {team} completada", state="complete")
+        except Exception as e:
+            status.update(label=f"❌ Error: {e}", state="error")
+            print(f"[FillGaps] Error:\n{traceback.format_exc()}")
+    st.rerun()
 
 
 # ---------------------------------------------------------------------------
