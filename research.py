@@ -43,7 +43,7 @@ from database import _find_existing_team_research
 # Sofascore formation crawler helper
 # ---------------------------------------------------------------------------
 
-def _crawl_formations(team_name: str, limit: int = 5) -> list[dict]:
+def _crawl_formations(team_name: str, limit: int = 10) -> list[dict]:
     """Crawl recent formations from Sofascore. Returns list of dicts with
     formation, players, and image_bytes.  Non-blocking: returns [] on any error."""
     import tempfile, shutil
@@ -999,11 +999,12 @@ def run_match_preparation(
 
     # --- Formations (Sofascore) ---
     if not results.get("home_formations"):
-        _cb(f"⚽ Buscando formaciones recientes de **{home_team}**…")
-        results["home_formations"] = _crawl_formations(home_team, limit=5)
+        _cb(f"⚽ Buscando formaciones recientes de **{research_home}**…")
+        results["home_formations"] = _crawl_formations(research_home, limit=10)
     if not results.get("away_formations"):
-        _cb(f"⚽ Buscando formaciones recientes de **{away_team}**…")
-        results["away_formations"] = _crawl_formations(away_team, limit=5)
+        _cb(f"⚽ Buscando formaciones recientes de **{research_away}**…")
+        results["away_formations"] = _crawl_formations(research_away, limit=10)
+    _save(results)
 
     return results
 
@@ -1103,7 +1104,8 @@ def run_team_research(
     # --- Formations (Sofascore) ---
     if not results.get("formations"):
         _cb(f"⚽ Buscando formaciones recientes de **{research_name}**…")
-        results["formations"] = _crawl_formations(research_name, limit=5)
+        results["formations"] = _crawl_formations(research_name, limit=10)
+    _save(results)
 
     return results
 
@@ -1388,7 +1390,8 @@ def run_national_team_research(
     # --- Formations (Sofascore) ---
     if not results.get("formations"):
         _cb(f"⚽ Buscando formaciones recientes de **{country}**…")
-        results["formations"] = _crawl_formations(country, limit=5)
+        results["formations"] = _crawl_formations(country, limit=10)
+    _save(results)
 
     return results
 
@@ -1521,10 +1524,11 @@ def run_national_match_prep(
     # --- Formations (Sofascore) ---
     if not results.get("home_formations"):
         _cb(f"⚽ Buscando formaciones recientes de **{research_home}**…")
-        results["home_formations"] = _crawl_formations(research_home, limit=5)
+        results["home_formations"] = _crawl_formations(research_home, limit=10)
     if not results.get("away_formations"):
         _cb(f"⚽ Buscando formaciones recientes de **{research_away}**…")
-        results["away_formations"] = _crawl_formations(research_away, limit=5)
+        results["away_formations"] = _crawl_formations(research_away, limit=10)
+    _save(results)
 
     return results
 
