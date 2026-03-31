@@ -225,6 +225,8 @@ def _load_match_prep(prep_id: str) -> Optional[Dict[str, Any]]:
             results[key] = _deserialize_text_result(raw_results.get(key, {}))
         for key in ("home_roster", "away_roster"):
             results[key] = _normalize_roster_entries(raw_results.get(key, []))
+        for key in ("home_formations", "away_formations"):
+            results[key] = raw_results.get(key, [])
         results["workflow_metrics"] = _init_workflow_metrics(
             "match_preparation",
             raw_results.get("workflow_metrics"),
@@ -323,6 +325,7 @@ def _load_team_research(research_id: str) -> Optional[Dict[str, Any]]:
         results["team_history"] = _deserialize_text_result(raw_results.get("team_history", {}))
         results["coach"] = _deserialize_text_result(raw_results.get("coach", {}))
         results["roster"] = _normalize_roster_entries(raw_results.get("roster", []))
+        results["formations"] = raw_results.get("formations", [])
         results["workflow_metrics"] = _init_workflow_metrics(
             "team_research",
             raw_results.get("workflow_metrics"),
@@ -605,6 +608,7 @@ def _load_national_team_research(research_id: str) -> Optional[Dict[str, Any]]:
         results["team_history"] = _deserialize_text_result(raw.get("team_history", {}))
         results["coach"] = _deserialize_text_result(raw.get("coach", {}))
         results["roster"] = _normalize_roster_entries(raw.get("roster", []))
+        results["formations"] = raw.get("formations", [])
         results["workflow_metrics"] = _init_workflow_metrics(
             "national_team_research",
             raw.get("workflow_metrics"),
@@ -705,6 +709,8 @@ def _load_national_match_prep(prep_id: str) -> Optional[Dict[str, Any]]:
             results[key] = _deserialize_text_result(raw.get(key, {}))
         results["home_roster"] = _normalize_roster_entries(raw.get("home_roster", []))
         results["away_roster"] = _normalize_roster_entries(raw.get("away_roster", []))
+        for key in ("home_formations", "away_formations"):
+            results[key] = raw.get(key, [])
         results["workflow_metrics"] = _init_workflow_metrics(
             "national_match_prep",
             raw.get("workflow_metrics"),

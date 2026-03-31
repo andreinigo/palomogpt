@@ -194,6 +194,13 @@ def _gemini_request(
             if attempt < _MAX_RETRIES - 1:
                 time.sleep(delay)
 
+    # Last resort: try Claude before giving up entirely
+    try:
+        print(f"[Gemini] All {_MAX_RETRIES} retries exhausted — trying Claude as last resort...")
+        return _claude_request(system_prompt, user_message, history)
+    except Exception as claude_err:
+        print(f"[Claude] Last-resort fallback also failed: {claude_err}")
+
     raise RuntimeError(f"Gemini API failed after {_MAX_RETRIES} attempts: {last_error}")
 
 
