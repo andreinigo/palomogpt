@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -262,6 +263,7 @@ def _research_coach(
 def _fetch_player_list(
     team_name: str,
     api_key: str,
+    _retries: int = 2,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     season_curr = CURRENT_YEAR - 1
     season_next = CURRENT_YEAR
@@ -273,61 +275,80 @@ def _fetch_player_list(
         current_date=CURRENT_DATE,
     )
 
-    text, _, tokens = _gemini_request(
-        api_key=api_key,
-        system_prompt=prompt,
-        user_message=(
-            f"Dame la plantilla completa actual de {team_name} para la temporada "
-            f"{season_curr}/{season_next}. Solo el JSON, nada más."
-        ),
-    )
+    last_err: Optional[Exception] = None
+    for attempt in range(_retries):
+        try:
+            text, _, tokens = _gemini_request(
+                api_key=api_key,
+                system_prompt=prompt,
+                user_message=(
+                    f"Dame la plantilla completa actual de {team_name} para la temporada "
+                    f"{season_curr}/{season_next}. Solo el JSON, nada más."
+                ),
+            )
 
-    json_match = re.search(r'\{[\s\S]*\}', text)
-    if not json_match:
-        raise RuntimeError(f"Could not parse player list JSON from response: {text[:300]}")
-    try:
-        data = json.loads(json_match.group())
-    except json.JSONDecodeError as e:
-        raise RuntimeError(f"Invalid JSON in player list: {e}\n{text[:300]}")
+            json_match = re.search(r'\{[\s\S]*\}', text)
+            if not json_match:
+                raise RuntimeError(f"Could not parse player list JSON from response: {text[:300]}")
+            try:
+                data = json.loads(json_match.group())
+            except json.JSONDecodeError as e:
+                raise RuntimeError(f"Invalid JSON in player list: {e}\n{text[:300]}")
 
-    players = data.get("players", [])
-    if not players:
-        raise RuntimeError(f"Empty player list returned for {team_name}")
-    return players, tokens
+            players = data.get("players", [])
+            if not players:
+                raise RuntimeError(f"Empty player list returned for {team_name}")
+            return players, tokens
+        except Exception as e:
+            last_err = e
+            if attempt < _retries - 1:
+                print(f"[Roster] _fetch_player_list attempt {attempt+1} failed for {team_name}: {e}  — retrying...")
+                time.sleep(2)
+    raise last_err  # type: ignore[misc]
 
 
 def _fetch_national_player_list(
     country: str,
     api_key: str,
+    _retries: int = 2,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     prompt = NATIONAL_ROSTER_LIST_PROMPT.format(
         country=country,
         current_date=CURRENT_DATE,
     )
 
-    text, _, tokens = _gemini_request(
-        api_key=api_key,
-        system_prompt=prompt,
-        user_message=(
-            f"Dame la ÚLTIMA CONVOCATORIA OFICIAL publicada de la selección de {country}. "
-            f"Necesito la lista real publicada por la federación, NO una lista estimada. "
-            f"Incluye el nombre del seleccionador ACTUAL y para qué ventana/torneo fue. "
-            f"Fecha de hoy: {CURRENT_DATE}. Solo el JSON, nada más."
-        ),
-    )
+    last_err: Optional[Exception] = None
+    for attempt in range(_retries):
+        try:
+            text, _, tokens = _gemini_request(
+                api_key=api_key,
+                system_prompt=prompt,
+                user_message=(
+                    f"Dame la ÚLTIMA CONVOCATORIA OFICIAL publicada de la selección de {country}. "
+                    f"Necesito la lista real publicada por la federación, NO una lista estimada. "
+                    f"Incluye el nombre del seleccionador ACTUAL y para qué ventana/torneo fue. "
+                    f"Fecha de hoy: {CURRENT_DATE}. Solo el JSON, nada más."
+                ),
+            )
 
-    json_match = re.search(r'\{[\s\S]*\}', text)
-    if not json_match:
-        raise RuntimeError(f"Could not parse national roster JSON from response: {text[:300]}")
-    try:
-        data = json.loads(json_match.group())
-    except json.JSONDecodeError as e:
-        raise RuntimeError(f"Invalid JSON in national roster: {e}\n{text[:300]}")
+            json_match = re.search(r'\{[\s\S]*\}', text)
+            if not json_match:
+                raise RuntimeError(f"Could not parse national roster JSON from response: {text[:300]}")
+            try:
+                data = json.loads(json_match.group())
+            except json.JSONDecodeError as e:
+                raise RuntimeError(f"Invalid JSON in national roster: {e}\n{text[:300]}")
 
-    players = data.get("players", [])
-    if not players:
-        raise RuntimeError(f"Empty convocatoria returned for {country}")
-    return players, tokens
+            players = data.get("players", [])
+            if not players:
+                raise RuntimeError(f"Empty convocatoria returned for {country}")
+            return players, tokens
+        except Exception as e:
+            last_err = e
+            if attempt < _retries - 1:
+                print(f"[Roster] _fetch_national_player_list attempt {attempt+1} failed for {country}: {e}  — retrying...")
+                time.sleep(2)
+    raise last_err  # type: ignore[misc]
 
 
 # ---------------------------------------------------------------------------
@@ -424,6 +445,9 @@ def _research_single_player_solo(
 # Roster research
 # ---------------------------------------------------------------------------
 
+_PLAYER_FUTURE_TIMEOUT = 300  # 5 min max per player
+
+
 def _research_team_roster(
     team_name: str,
     opponent_name: str,
@@ -431,6 +455,7 @@ def _research_team_roster(
     progress_cb: Optional[Callable[[str], None]] = None,
     workflow_metrics: Optional[Dict[str, Any]] = None,
     step_prefix: str = "roster",
+    on_batch_complete: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
 ) -> List[Dict[str, Any]]:
     if progress_cb:
         progress_cb(f"📋 Obteniendo lista de jugadores de **{team_name}**...")
@@ -462,7 +487,7 @@ def _research_team_roster(
             for future in as_completed(future_to_idx):
                 idx = future_to_idx[future]
                 try:
-                    results[idx] = future.result()
+                    results[idx] = future.result(timeout=_PLAYER_FUTURE_TIMEOUT)
                 except Exception as e:
                     p = players[idx]
                     results[idx] = {
@@ -485,6 +510,9 @@ def _research_team_roster(
                 if progress_cb:
                     pname = results[idx]["name"]
                     progress_cb(f"🔍 [{completed}/{total}] **{pname}** ✓  ({team_name})")
+        # Save after each batch so partial roster survives crashes
+        if on_batch_complete:
+            on_batch_complete([r for r in results if r is not None])
 
     return results
 
@@ -495,6 +523,7 @@ def _research_team_roster_solo(
     progress_cb: Optional[Callable[[str], None]] = None,
     workflow_metrics: Optional[Dict[str, Any]] = None,
     step_prefix: str = "roster",
+    on_batch_complete: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
 ) -> List[Dict[str, Any]]:
     if progress_cb:
         progress_cb(f"📋 Obteniendo lista de jugadores de **{team_name}**...")
@@ -523,7 +552,7 @@ def _research_team_roster_solo(
             for future in as_completed(future_to_idx):
                 idx = future_to_idx[future]
                 try:
-                    results[idx] = future.result()
+                    results[idx] = future.result(timeout=_PLAYER_FUTURE_TIMEOUT)
                 except Exception as e:
                     p = players[idx]
                     results[idx] = {
@@ -546,6 +575,8 @@ def _research_team_roster_solo(
                 if progress_cb:
                     pname = results[idx]["name"]
                     progress_cb(f"🔍 [{completed}/{total}] **{pname}** ✓  ({team_name})")
+        if on_batch_complete:
+            on_batch_complete([r for r in results if r is not None])
 
     return results
 
@@ -771,11 +802,15 @@ def run_match_preparation(
     # Phase 2: rosters
     if not _has_data(results.get("home_roster")):
         _cb(f"👥 Investigando plantilla de **{research_home}** jugador por jugador...")
+        def _on_home_batch(partial_roster: list) -> None:
+            results["home_roster"] = partial_roster
+            _save(results)
         try:
             results["home_roster"] = _research_team_roster(
                 research_home, research_away, api_key,
                 progress_cb=_cb, workflow_metrics=workflow_metrics,
                 step_prefix="match_prep.home_roster",
+                on_batch_complete=_on_home_batch,
             )
         except Exception as e:
             results["home_roster"] = []
@@ -792,11 +827,15 @@ def run_match_preparation(
 
     if not _has_data(results.get("away_roster")):
         _cb(f"👥 Investigando plantilla de **{research_away}** jugador por jugador...")
+        def _on_away_batch(partial_roster: list) -> None:
+            results["away_roster"] = partial_roster
+            _save(results)
         try:
             results["away_roster"] = _research_team_roster(
                 research_away, research_home, api_key,
                 progress_cb=_cb, workflow_metrics=workflow_metrics,
                 step_prefix="match_prep.away_roster",
+                on_batch_complete=_on_away_batch,
             )
         except Exception as e:
             results["away_roster"] = []
@@ -910,11 +949,15 @@ def run_team_research(
 
     if not _has_data(results.get("roster")):
         _cb(f"👥 Investigando plantilla de **{research_name}** jugador por jugador...")
+        def _on_roster_batch(partial_roster: list) -> None:
+            results["roster"] = partial_roster
+            _save(results)
         try:
             results["roster"] = _research_team_roster_solo(
                 research_name, api_key,
                 progress_cb=_cb, workflow_metrics=workflow_metrics,
                 step_prefix="team_research.roster",
+                on_batch_complete=_on_roster_batch,
             )
         except Exception as e:
             results["roster"] = []
@@ -1029,6 +1072,7 @@ def _research_national_roster(
     progress_cb: Optional[Callable[[str], None]] = None,
     workflow_metrics: Optional[Dict[str, Any]] = None,
     step_prefix: str = "roster",
+    on_batch_complete: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
 ) -> List[Dict[str, Any]]:
     if progress_cb:
         progress_cb(f"📋 Obteniendo última convocatoria de **{country}**...")
@@ -1057,7 +1101,7 @@ def _research_national_roster(
             for future in as_completed(future_to_idx):
                 idx = future_to_idx[future]
                 try:
-                    results[idx] = future.result()
+                    results[idx] = future.result(timeout=_PLAYER_FUTURE_TIMEOUT)
                 except Exception as e:
                     p = players[idx]
                     results[idx] = {
@@ -1080,6 +1124,8 @@ def _research_national_roster(
                 if progress_cb:
                     pname = results[idx]["name"]
                     progress_cb(f"🔍 [{completed}/{total}] **{pname}** ✓")
+        if on_batch_complete:
+            on_batch_complete([r for r in results if r is not None])
 
     return results
 
@@ -1155,11 +1201,15 @@ def run_national_team_research(
 
     if not _has_data(results.get("roster")):
         _cb(f"👥 Investigando convocatoria de **{country}**...")
+        def _on_nat_roster_batch(partial_roster: list) -> None:
+            results["roster"] = partial_roster
+            _save(results)
         try:
             results["roster"] = _research_national_roster(
                 country, api_key,
                 progress_cb=_cb, workflow_metrics=workflow_metrics,
                 step_prefix="national_team_research.roster",
+                on_batch_complete=_on_nat_roster_batch,
             )
         except Exception as e:
             results["roster"] = []
@@ -1247,11 +1297,15 @@ def run_national_match_prep(
 
     if not _has_data(results.get("home_roster")):
         _cb(f"👥 Investigando convocatoria de **{research_home}**...")
+        def _on_nat_home_batch(partial_roster: list) -> None:
+            results["home_roster"] = partial_roster
+            _save(results)
         try:
             results["home_roster"] = _research_national_roster(
                 research_home, api_key,
                 progress_cb=_cb, workflow_metrics=workflow_metrics,
                 step_prefix="national_match_prep.home_roster",
+                on_batch_complete=_on_nat_home_batch,
             )
         except Exception as e:
             results["home_roster"] = []
@@ -1270,11 +1324,15 @@ def run_national_match_prep(
 
     if not _has_data(results.get("away_roster")):
         _cb(f"👥 Investigando convocatoria de **{research_away}**...")
+        def _on_nat_away_batch(partial_roster: list) -> None:
+            results["away_roster"] = partial_roster
+            _save(results)
         try:
             results["away_roster"] = _research_national_roster(
                 research_away, api_key,
                 progress_cb=_cb, workflow_metrics=workflow_metrics,
                 step_prefix="national_match_prep.away_roster",
+                on_batch_complete=_on_nat_away_batch,
             )
         except Exception as e:
             results["away_roster"] = []
