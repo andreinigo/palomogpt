@@ -112,6 +112,10 @@ def _run_sel_team_pipeline(config: dict, api_key: str, partial_results: Optional
 
         def _on_phase(partial: dict) -> None:
             st.session_state.nat_team_research_results = partial
+            try:
+                _save_national_team_research(config, partial)
+            except Exception:
+                pass
 
         try:
             results = run_national_team_research(
@@ -138,10 +142,11 @@ def _run_sel_team_pipeline(config: dict, api_key: str, partial_results: Optional
             except Exception as e:
                 print(f"[Sel] Error saving national team: {e}")
         except Exception as e:
-            if partial_results:
-                st.session_state.nat_team_research_results = partial_results
+            error_results = st.session_state.get("nat_team_research_results") or partial_results
+            if error_results:
+                st.session_state.nat_team_research_results = error_results
                 try:
-                    saved_id = _save_national_team_research(config, partial_results)
+                    saved_id = _save_national_team_research(config, error_results)
                     _persist_usage_run_safe(
                         run_id=_new_usage_run_id("nat-team"),
                         source_type="national_team_research",
@@ -150,7 +155,7 @@ def _run_sel_team_pipeline(config: dict, api_key: str, partial_results: Optional
                         title=str(config.get("country", "") or "Selección"),
                         subject=str(config.get("confederation", "") or config.get("country", "")),
                         metrics=_slice_workflow_metrics(
-                            partial_results.get("workflow_metrics"),
+                            error_results.get("workflow_metrics"),
                             baseline_step_count,
                         ),
                     )
@@ -288,6 +293,10 @@ def _run_sel_match_pipeline(config: dict, api_key: str, partial_results: Optiona
 
         def _on_phase(partial: dict) -> None:
             st.session_state.nat_match_results = partial
+            try:
+                _save_national_match_prep(config, partial)
+            except Exception:
+                pass
 
         try:
             results = run_national_match_prep(
@@ -319,10 +328,11 @@ def _run_sel_match_pipeline(config: dict, api_key: str, partial_results: Optiona
             except Exception as e:
                 print(f"[Sel] Error saving nat match: {e}")
         except Exception as e:
-            if partial_results:
-                st.session_state.nat_match_results = partial_results
+            error_results = st.session_state.get("nat_match_results") or partial_results
+            if error_results:
+                st.session_state.nat_match_results = error_results
                 try:
-                    saved_id = _save_national_match_prep(config, partial_results)
+                    saved_id = _save_national_match_prep(config, error_results)
                     _persist_usage_run_safe(
                         run_id=_new_usage_run_id("nat-match"),
                         source_type="national_match_prep",
@@ -333,7 +343,7 @@ def _run_sel_match_pipeline(config: dict, api_key: str, partial_results: Optiona
                             [part for part in [config.get("tournament", ""), config.get("match_type", "")] if part]
                         ) or title,
                         metrics=_slice_workflow_metrics(
-                            partial_results.get("workflow_metrics"),
+                            error_results.get("workflow_metrics"),
                             baseline_step_count,
                         ),
                     )
@@ -469,10 +479,11 @@ def _run_sel_player_pipeline(config: dict, api_key: str, partial_results: Option
             except Exception as e:
                 print(f"[Sel] Error saving nat player: {e}")
         except Exception as e:
-            if partial_results:
-                st.session_state.nat_player_results = partial_results
+            error_results = st.session_state.get("nat_player_results") or partial_results
+            if error_results:
+                st.session_state.nat_player_results = error_results
                 try:
-                    saved_id = _save_national_player_research(config, partial_results)
+                    saved_id = _save_national_player_research(config, error_results)
                     _persist_usage_run_safe(
                         run_id=_new_usage_run_id("nat-player"),
                         source_type="national_player_research",
@@ -481,7 +492,7 @@ def _run_sel_player_pipeline(config: dict, api_key: str, partial_results: Option
                         title=str(config.get("player_name", "") or "Convocado"),
                         subject=str(config.get("country", "") or config.get("player_name", "")),
                         metrics=_slice_workflow_metrics(
-                            partial_results.get("workflow_metrics"),
+                            error_results.get("workflow_metrics"),
                             baseline_step_count,
                         ),
                     )

@@ -236,6 +236,10 @@ def _run_match_pipeline(
 
         def _on_phase(partial: dict) -> None:
             st.session_state.match_results = partial
+            try:
+                _save_match_prep(config, partial)
+            except Exception:
+                pass
 
         try:
             results = run_match_preparation(
@@ -281,10 +285,11 @@ def _run_match_pipeline(
             except Exception as e:
                 print(f"[MatchPrep] Error auto-saving team data: {e}")
         except Exception as e:
-            if partial_results:
-                st.session_state.match_results = partial_results
+            error_results = st.session_state.get("match_results") or partial_results
+            if error_results:
+                st.session_state.match_results = error_results
                 try:
-                    saved_id = _save_match_prep(config, partial_results)
+                    saved_id = _save_match_prep(config, error_results)
                     _persist_usage_run_safe(
                         run_id=_new_usage_run_id("match-prep"),
                         source_type="match_prep",
@@ -293,7 +298,7 @@ def _run_match_pipeline(
                         title=match_title,
                         subject=match_subject or match_title,
                         metrics=_slice_workflow_metrics(
-                            partial_results.get("workflow_metrics"),
+                            error_results.get("workflow_metrics"),
                             baseline_step_count,
                         ),
                     )
@@ -569,6 +574,10 @@ def _run_team_research_pipeline(
 
         def _on_phase(partial: dict) -> None:
             st.session_state.team_research_results = partial
+            try:
+                _save_team_research(config, partial)
+            except Exception:
+                pass
 
         try:
             results = run_team_research(
@@ -597,10 +606,11 @@ def _run_team_research_pipeline(
             except Exception as e:
                 print(f"[TeamResearch] Error saving to Supabase: {e}")
         except Exception as e:
-            if partial_results:
-                st.session_state.team_research_results = partial_results
+            error_results = st.session_state.get("team_research_results") or partial_results
+            if error_results:
+                st.session_state.team_research_results = error_results
                 try:
-                    saved_id = _save_team_research(config, partial_results)
+                    saved_id = _save_team_research(config, error_results)
                     _persist_usage_run_safe(
                         run_id=_new_usage_run_id("team-research"),
                         source_type="team_research",
@@ -609,7 +619,7 @@ def _run_team_research_pipeline(
                         title=team_name,
                         subject=config.get("tournament", "") or team_name,
                         metrics=_slice_workflow_metrics(
-                            partial_results.get("workflow_metrics"),
+                            error_results.get("workflow_metrics"),
                             baseline_step_count,
                         ),
                     )
@@ -778,10 +788,11 @@ def _run_player_research_pipeline(
             except Exception as e:
                 print(f"[PlayerResearch] Error saving to Supabase: {e}")
         except Exception as e:
-            if partial_results:
-                st.session_state.player_research_results = partial_results
+            error_results = st.session_state.get("player_research_results") or partial_results
+            if error_results:
+                st.session_state.player_research_results = error_results
                 try:
-                    saved_id = _save_player_research(config, partial_results)
+                    saved_id = _save_player_research(config, error_results)
                     _persist_usage_run_safe(
                         run_id=_new_usage_run_id("player-research"),
                         source_type="player_research",
@@ -790,7 +801,7 @@ def _run_player_research_pipeline(
                         title=player_name,
                         subject=" · ".join([part for part in [team_name, position] if part]) or player_name,
                         metrics=_slice_workflow_metrics(
-                            partial_results.get("workflow_metrics"),
+                            error_results.get("workflow_metrics"),
                             baseline_step_count,
                         ),
                     )
