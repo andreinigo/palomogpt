@@ -456,6 +456,7 @@ def _research_team_roster(
     workflow_metrics: Optional[Dict[str, Any]] = None,
     step_prefix: str = "roster",
     on_batch_complete: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
+    existing_roster: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     if progress_cb:
         progress_cb(f"📋 Obteniendo lista de jugadores de **{team_name}**...")
@@ -467,22 +468,47 @@ def _research_team_roster(
             f"{team_name}: lista de jugadores",
             list_tokens,
         )
+
+    # Build lookup of already-researched players to skip them
+    existing_by_name: Dict[str, Dict[str, Any]] = {}
+    if existing_roster:
+        for entry in existing_roster:
+            name = (entry.get("name") or "").strip().lower()
+            if name and not entry.get("text", "").startswith("❌"):
+                existing_by_name[name] = entry
+
     total = len(players)
     if progress_cb:
-        progress_cb(f"✅ {total} jugadores encontrados en **{team_name}**. Investigando uno por uno...")
+        if existing_by_name:
+            progress_cb(
+                f"✅ {total} jugadores en lista, {len(existing_by_name)} ya investigados. "
+                f"Completando plantilla de **{team_name}**..."
+            )
+        else:
+            progress_cb(f"✅ {total} jugadores encontrados en **{team_name}**. Investigando uno por uno...")
 
     results: List[Dict[str, Any]] = [None] * total  # type: ignore[list-item]
+    # Pre-fill results with existing entries where names match
+    pending_indices: List[int] = []
+    for i, player in enumerate(players):
+        pname = (player.get("name") or "").strip().lower()
+        if pname in existing_by_name:
+            results[i] = existing_by_name[pname]
+        else:
+            pending_indices.append(i)
+
     completed = 0
+    total_pending = len(pending_indices)
 
     batch_size = 4
-    for batch_start in range(0, total, batch_size):
-        batch = players[batch_start : batch_start + batch_size]
+    for batch_start in range(0, total_pending, batch_size):
+        batch_idxs = pending_indices[batch_start : batch_start + batch_size]
         with ThreadPoolExecutor(max_workers=batch_size) as executor:
             future_to_idx = {
                 executor.submit(
-                    _research_single_player, player, team_name, opponent_name, api_key
-                ): batch_start + i
-                for i, player in enumerate(batch)
+                    _research_single_player, players[idx], team_name, opponent_name, api_key
+                ): idx
+                for idx in batch_idxs
             }
             for future in as_completed(future_to_idx):
                 idx = future_to_idx[future]
@@ -509,7 +535,7 @@ def _research_team_roster(
                 completed += 1
                 if progress_cb:
                     pname = results[idx]["name"]
-                    progress_cb(f"🔍 [{completed}/{total}] **{pname}** ✓  ({team_name})")
+                    progress_cb(f"🔍 [{completed}/{total_pending}] **{pname}** ✓  ({team_name})")
         # Save after each batch so partial roster survives crashes
         if on_batch_complete:
             on_batch_complete([r for r in results if r is not None])
@@ -524,6 +550,7 @@ def _research_team_roster_solo(
     workflow_metrics: Optional[Dict[str, Any]] = None,
     step_prefix: str = "roster",
     on_batch_complete: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
+    existing_roster: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     if progress_cb:
         progress_cb(f"📋 Obteniendo lista de jugadores de **{team_name}**...")
@@ -535,19 +562,44 @@ def _research_team_roster_solo(
             f"{team_name}: lista de jugadores",
             list_tokens,
         )
+
+    # Build lookup of already-researched players to skip them
+    existing_by_name: Dict[str, Dict[str, Any]] = {}
+    if existing_roster:
+        for entry in existing_roster:
+            name = (entry.get("name") or "").strip().lower()
+            if name and not entry.get("text", "").startswith("❌"):
+                existing_by_name[name] = entry
+
     total = len(players)
     if progress_cb:
-        progress_cb(f"✅ {total} jugadores encontrados en **{team_name}**. Investigando uno por uno...")
+        if existing_by_name:
+            progress_cb(
+                f"✅ {total} jugadores en lista, {len(existing_by_name)} ya investigados. "
+                f"Completando plantilla de **{team_name}**..."
+            )
+        else:
+            progress_cb(f"✅ {total} jugadores encontrados en **{team_name}**. Investigando uno por uno...")
 
     results: List[Dict[str, Any]] = [None] * total  # type: ignore[list-item]
+    # Pre-fill results with existing entries where names match
+    pending_indices: List[int] = []
+    for i, player in enumerate(players):
+        pname = (player.get("name") or "").strip().lower()
+        if pname in existing_by_name:
+            results[i] = existing_by_name[pname]
+        else:
+            pending_indices.append(i)
+
     completed = 0
+    total_pending = len(pending_indices)
     batch_size = 4
-    for batch_start in range(0, total, batch_size):
-        batch = players[batch_start: batch_start + batch_size]
+    for batch_start in range(0, total_pending, batch_size):
+        batch_idxs = pending_indices[batch_start : batch_start + batch_size]
         with ThreadPoolExecutor(max_workers=batch_size) as executor:
             future_to_idx = {
-                executor.submit(_research_single_player_solo, player, team_name, api_key): batch_start + i
-                for i, player in enumerate(batch)
+                executor.submit(_research_single_player_solo, players[idx], team_name, api_key): idx
+                for idx in batch_idxs
             }
             for future in as_completed(future_to_idx):
                 idx = future_to_idx[future]
@@ -574,7 +626,7 @@ def _research_team_roster_solo(
                 completed += 1
                 if progress_cb:
                     pname = results[idx]["name"]
-                    progress_cb(f"🔍 [{completed}/{total}] **{pname}** ✓  ({team_name})")
+                    progress_cb(f"🔍 [{completed}/{total_pending}] **{pname}** ✓  ({team_name})")
         if on_batch_complete:
             on_batch_complete([r for r in results if r is not None])
 
@@ -632,6 +684,21 @@ def _roster_has_failures(roster: list) -> bool:
         p.get("text", "").startswith("❌")
         for p in roster
     )
+
+
+_REQUIRED_POSITIONS = {"GK", "DEF", "MID", "FWD"}
+
+
+def _roster_is_complete(roster: list) -> bool:
+    """A roster is complete when it has non-failed entries from all 4 position groups."""
+    if not roster:
+        return False
+    positions = {
+        p.get("position", "").upper()
+        for p in roster
+        if not p.get("text", "").startswith("❌")
+    }
+    return _REQUIRED_POSITIONS.issubset(positions)
 
 
 def _retry_failed_roster_players(
@@ -800,8 +867,12 @@ def run_match_preparation(
     _save(results)
 
     # Phase 2: rosters
-    if not _has_data(results.get("home_roster")):
-        _cb(f"👥 Investigando plantilla de **{research_home}** jugador por jugador...")
+    if not _roster_is_complete(results.get("home_roster", [])):
+        existing_home = results.get("home_roster", [])
+        if existing_home:
+            _cb(f"👥 Completando plantilla de **{research_home}** ({len(existing_home)} jugadores parciales)...")
+        else:
+            _cb(f"👥 Investigando plantilla de **{research_home}** jugador por jugador...")
         def _on_home_batch(partial_roster: list) -> None:
             results["home_roster"] = partial_roster
             _save(results)
@@ -811,9 +882,10 @@ def run_match_preparation(
                 progress_cb=_cb, workflow_metrics=workflow_metrics,
                 step_prefix="match_prep.home_roster",
                 on_batch_complete=_on_home_batch,
+                existing_roster=existing_home,
             )
         except Exception as e:
-            results["home_roster"] = []
+            results["home_roster"] = existing_home or []
             _cb(f"❌ Error con plantilla de {home_team}: {e}")
     elif _roster_has_failures(results.get("home_roster", [])):
         results["home_roster"] = _retry_failed_roster_players(
@@ -825,8 +897,12 @@ def run_match_preparation(
         _cb(f"✅ Plantilla de **{home_team}** ya disponible — reutilizando.")
     _save(results)
 
-    if not _has_data(results.get("away_roster")):
-        _cb(f"👥 Investigando plantilla de **{research_away}** jugador por jugador...")
+    if not _roster_is_complete(results.get("away_roster", [])):
+        existing_away = results.get("away_roster", [])
+        if existing_away:
+            _cb(f"👥 Completando plantilla de **{research_away}** ({len(existing_away)} jugadores parciales)...")
+        else:
+            _cb(f"👥 Investigando plantilla de **{research_away}** jugador por jugador...")
         def _on_away_batch(partial_roster: list) -> None:
             results["away_roster"] = partial_roster
             _save(results)
@@ -836,9 +912,10 @@ def run_match_preparation(
                 progress_cb=_cb, workflow_metrics=workflow_metrics,
                 step_prefix="match_prep.away_roster",
                 on_batch_complete=_on_away_batch,
+                existing_roster=existing_away,
             )
         except Exception as e:
-            results["away_roster"] = []
+            results["away_roster"] = existing_away or []
             _cb(f"❌ Error con plantilla de {research_away}: {e}")
     elif _roster_has_failures(results.get("away_roster", [])):
         results["away_roster"] = _retry_failed_roster_players(
@@ -947,8 +1024,12 @@ def run_team_research(
         _cb("✅ Entrenador ya disponible — reutilizando.")
     _save(results)
 
-    if not _has_data(results.get("roster")):
-        _cb(f"👥 Investigando plantilla de **{research_name}** jugador por jugador...")
+    if not _roster_is_complete(results.get("roster", [])):
+        existing_roster = results.get("roster", [])
+        if existing_roster:
+            _cb(f"👥 Completando plantilla de **{research_name}** ({len(existing_roster)} jugadores parciales)...")
+        else:
+            _cb(f"👥 Investigando plantilla de **{research_name}** jugador por jugador...")
         def _on_roster_batch(partial_roster: list) -> None:
             results["roster"] = partial_roster
             _save(results)
@@ -958,9 +1039,10 @@ def run_team_research(
                 progress_cb=_cb, workflow_metrics=workflow_metrics,
                 step_prefix="team_research.roster",
                 on_batch_complete=_on_roster_batch,
+                existing_roster=existing_roster,
             )
         except Exception as e:
-            results["roster"] = []
+            results["roster"] = existing_roster or []
             _cb(f"❌ Error con plantilla de {team_name}: {e}")
     elif _roster_has_failures(results.get("roster", [])):
         results["roster"] = _retry_failed_roster_players(
@@ -1073,6 +1155,7 @@ def _research_national_roster(
     workflow_metrics: Optional[Dict[str, Any]] = None,
     step_prefix: str = "roster",
     on_batch_complete: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
+    existing_roster: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     if progress_cb:
         progress_cb(f"📋 Obteniendo última convocatoria de **{country}**...")
@@ -1084,19 +1167,44 @@ def _research_national_roster(
             f"{country}: lista de convocados",
             list_tokens,
         )
+
+    # Build lookup of already-researched players to skip them
+    existing_by_name: Dict[str, Dict[str, Any]] = {}
+    if existing_roster:
+        for entry in existing_roster:
+            name = (entry.get("name") or "").strip().lower()
+            if name and not entry.get("text", "").startswith("❌"):
+                existing_by_name[name] = entry
+
     total = len(players)
     if progress_cb:
-        progress_cb(f"✅ {total} convocados de **{country}**. Investigando uno por uno...")
+        if existing_by_name:
+            progress_cb(
+                f"✅ {total} convocados, {len(existing_by_name)} ya investigados. "
+                f"Completando convocatoria de **{country}**..."
+            )
+        else:
+            progress_cb(f"✅ {total} convocados de **{country}**. Investigando uno por uno...")
 
     results: List[Dict[str, Any]] = [None] * total  # type: ignore[list-item]
+    # Pre-fill results with existing entries where names match
+    pending_indices: List[int] = []
+    for i, player in enumerate(players):
+        pname = (player.get("name") or "").strip().lower()
+        if pname in existing_by_name:
+            results[i] = existing_by_name[pname]
+        else:
+            pending_indices.append(i)
+
     completed = 0
+    total_pending = len(pending_indices)
     batch_size = 4
-    for batch_start in range(0, total, batch_size):
-        batch = players[batch_start: batch_start + batch_size]
+    for batch_start in range(0, total_pending, batch_size):
+        batch_idxs = pending_indices[batch_start : batch_start + batch_size]
         with ThreadPoolExecutor(max_workers=batch_size) as executor:
             future_to_idx = {
-                executor.submit(_research_national_player_solo, player, country, api_key): batch_start + i
-                for i, player in enumerate(batch)
+                executor.submit(_research_national_player_solo, players[idx], country, api_key): idx
+                for idx in batch_idxs
             }
             for future in as_completed(future_to_idx):
                 idx = future_to_idx[future]
@@ -1123,7 +1231,7 @@ def _research_national_roster(
                 completed += 1
                 if progress_cb:
                     pname = results[idx]["name"]
-                    progress_cb(f"🔍 [{completed}/{total}] **{pname}** ✓")
+                    progress_cb(f"🔍 [{completed}/{total_pending}] **{pname}** ✓")
         if on_batch_complete:
             on_batch_complete([r for r in results if r is not None])
 
@@ -1199,8 +1307,12 @@ def run_national_team_research(
         _cb("✅ Seleccionador ya disponible — reutilizando.")
     _save(results)
 
-    if not _has_data(results.get("roster")):
-        _cb(f"👥 Investigando convocatoria de **{country}**...")
+    if not _roster_is_complete(results.get("roster", [])):
+        existing_roster = results.get("roster", [])
+        if existing_roster:
+            _cb(f"👥 Completando convocatoria de **{country}** ({len(existing_roster)} jugadores parciales)...")
+        else:
+            _cb(f"👥 Investigando convocatoria de **{country}**...")
         def _on_nat_roster_batch(partial_roster: list) -> None:
             results["roster"] = partial_roster
             _save(results)
@@ -1210,9 +1322,10 @@ def run_national_team_research(
                 progress_cb=_cb, workflow_metrics=workflow_metrics,
                 step_prefix="national_team_research.roster",
                 on_batch_complete=_on_nat_roster_batch,
+                existing_roster=existing_roster,
             )
         except Exception as e:
-            results["roster"] = []
+            results["roster"] = existing_roster or []
             _cb(f"❌ Error con convocatoria de {country}: {e}")
     elif _roster_has_failures(results.get("roster", [])):
         results["roster"] = _retry_failed_roster_players(
@@ -1295,8 +1408,12 @@ def run_national_match_prep(
         _cb("✅ Análisis ya disponible — reutilizando.")
     _save(results)
 
-    if not _has_data(results.get("home_roster")):
-        _cb(f"👥 Investigando convocatoria de **{research_home}**...")
+    if not _roster_is_complete(results.get("home_roster", [])):
+        existing_home = results.get("home_roster", [])
+        if existing_home:
+            _cb(f"👥 Completando convocatoria de **{research_home}** ({len(existing_home)} jugadores parciales)...")
+        else:
+            _cb(f"👥 Investigando convocatoria de **{research_home}**...")
         def _on_nat_home_batch(partial_roster: list) -> None:
             results["home_roster"] = partial_roster
             _save(results)
@@ -1306,9 +1423,10 @@ def run_national_match_prep(
                 progress_cb=_cb, workflow_metrics=workflow_metrics,
                 step_prefix="national_match_prep.home_roster",
                 on_batch_complete=_on_nat_home_batch,
+                existing_roster=existing_home,
             )
         except Exception as e:
-            results["home_roster"] = []
+            results["home_roster"] = existing_home or []
             _cb(f"❌ Error con convocatoria de {research_home}: {e}")
     elif _roster_has_failures(results.get("home_roster", [])):
         results["home_roster"] = _retry_failed_roster_players(
@@ -1322,8 +1440,12 @@ def run_national_match_prep(
         _cb(f"✅ Convocatoria de **{research_home}** ya disponible — reutilizando.")
     _save(results)
 
-    if not _has_data(results.get("away_roster")):
-        _cb(f"👥 Investigando convocatoria de **{research_away}**...")
+    if not _roster_is_complete(results.get("away_roster", [])):
+        existing_away = results.get("away_roster", [])
+        if existing_away:
+            _cb(f"👥 Completando convocatoria de **{research_away}** ({len(existing_away)} jugadores parciales)...")
+        else:
+            _cb(f"👥 Investigando convocatoria de **{research_away}**...")
         def _on_nat_away_batch(partial_roster: list) -> None:
             results["away_roster"] = partial_roster
             _save(results)
@@ -1333,9 +1455,10 @@ def run_national_match_prep(
                 progress_cb=_cb, workflow_metrics=workflow_metrics,
                 step_prefix="national_match_prep.away_roster",
                 on_batch_complete=_on_nat_away_batch,
+                existing_roster=existing_away,
             )
         except Exception as e:
-            results["away_roster"] = []
+            results["away_roster"] = existing_away or []
             _cb(f"❌ Error con convocatoria de {research_away}: {e}")
     elif _roster_has_failures(results.get("away_roster", [])):
         results["away_roster"] = _retry_failed_roster_players(
