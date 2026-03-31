@@ -109,6 +109,10 @@ def _run_sel_team_pipeline(config: dict, api_key: str, partial_results: Optional
     with st.status(label, expanded=True) as status:
         def _progress(msg: str) -> None:
             status.write(msg)
+
+        def _on_phase(partial: dict) -> None:
+            st.session_state.nat_team_research_results = partial
+
         try:
             results = run_national_team_research(
                 country=config["country"],
@@ -116,6 +120,7 @@ def _run_sel_team_pipeline(config: dict, api_key: str, partial_results: Optional
                 api_key=api_key,
                 progress_cb=_progress,
                 partial_results=partial_results,
+                on_phase_complete=_on_phase,
             )
             st.session_state.nat_team_research_results = results
             status.update(label="✅ ¡Investigación completa!", state="complete", expanded=False)
@@ -280,6 +285,10 @@ def _run_sel_match_pipeline(config: dict, api_key: str, partial_results: Optiona
     with st.status(label, expanded=True) as status:
         def _progress(msg: str) -> None:
             status.write(msg)
+
+        def _on_phase(partial: dict) -> None:
+            st.session_state.nat_match_results = partial
+
         try:
             results = run_national_match_prep(
                 home_country=config["home_country"],
@@ -290,6 +299,7 @@ def _run_sel_match_pipeline(config: dict, api_key: str, partial_results: Optiona
                 progress_cb=_progress,
                 partial_results=partial_results,
                 is_womens=config.get("is_womens", False),
+                on_phase_complete=_on_phase,
             )
             st.session_state.nat_match_results = results
             status.update(label="✅ ¡Partido preparado!", state="complete", expanded=False)

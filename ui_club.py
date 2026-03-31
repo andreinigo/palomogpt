@@ -234,6 +234,9 @@ def _run_match_pipeline(
         def _progress(msg: str) -> None:
             status.write(msg)
 
+        def _on_phase(partial: dict) -> None:
+            st.session_state.match_results = partial
+
         try:
             results = run_match_preparation(
                 home_team=home_team,
@@ -246,6 +249,7 @@ def _run_match_pipeline(
                 partial_results=partial_results,
                 initial_metrics=initial_metrics,
                 is_womens=config.get("is_womens", False),
+                on_phase_complete=_on_phase,
             )
             st.session_state.match_results = results
             st.session_state.pop("match_pdf_bytes", None)
@@ -563,6 +567,9 @@ def _run_team_research_pipeline(
         def _progress(msg: str) -> None:
             status.write(msg)
 
+        def _on_phase(partial: dict) -> None:
+            st.session_state.team_research_results = partial
+
         try:
             results = run_team_research(
                 team_name=team_name,
@@ -571,6 +578,7 @@ def _run_team_research_pipeline(
                 progress_cb=_progress,
                 partial_results=partial_results,
                 is_womens=config.get("is_womens", False),
+                on_phase_complete=_on_phase,
             )
             st.session_state.team_research_results = results
             status.update(label="✅ ¡Investigación completa!", state="complete", expanded=False)

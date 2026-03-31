@@ -676,8 +676,10 @@ def run_match_preparation(
     partial_results: Optional[Dict[str, Any]] = None,
     initial_metrics: Optional[Dict[str, Any]] = None,
     is_womens: bool = False,
+    on_phase_complete: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
     _cb = progress_cb or (lambda _msg: None)
+    _save = on_phase_complete or (lambda _r: None)
     results: Dict[str, Any] = partial_results or {
         "home_history": ("", []),
         "away_history": ("", []),
@@ -734,6 +736,7 @@ def run_match_preparation(
         _cb("✅ Historiales completados.")
     else:
         _cb("✅ Historiales ya disponibles — reutilizando.")
+    _save(results)
 
     # Phase 1.5: coach research
     need_home_coach = not _has_data(results.get("home_coach"))
@@ -763,6 +766,7 @@ def run_match_preparation(
         _cb("✅ Entrenadores completados.")
     else:
         _cb("✅ Entrenadores ya disponibles — reutilizando.")
+    _save(results)
 
     # Phase 2: rosters
     if not _has_data(results.get("home_roster")):
@@ -784,6 +788,7 @@ def run_match_preparation(
         )
     else:
         _cb(f"✅ Plantilla de **{home_team}** ya disponible — reutilizando.")
+    _save(results)
 
     if not _has_data(results.get("away_roster")):
         _cb(f"👥 Investigando plantilla de **{research_away}** jugador por jugador...")
@@ -804,6 +809,7 @@ def run_match_preparation(
         )
     else:
         _cb(f"✅ Plantilla de **{research_away}** ya disponible — reutilizando.")
+    _save(results)
 
     # Phase 3: Palomo phrases
     if not _has_data(results.get("palomo_phrases")):
@@ -827,6 +833,7 @@ def run_match_preparation(
             results["palomo_phrases"] = (f"❌ Error generando frases: {e}", [], _empty_token_usage())
     else:
         _cb("✅ Frases de Palomo ya disponibles — reutilizando.")
+    _save(results)
 
     # --- Formations (Sofascore) ---
     if not results.get("home_formations"):
@@ -850,8 +857,10 @@ def run_team_research(
     progress_cb: Optional[Callable[[str], None]] = None,
     partial_results: Optional[Dict[str, Any]] = None,
     is_womens: bool = False,
+    on_phase_complete: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
     _cb = progress_cb or (lambda _msg: None)
+    _save = on_phase_complete or (lambda _r: None)
     results: Dict[str, Any] = partial_results or {
         "team_history": ("", []),
         "coach": ("", []),
@@ -878,6 +887,7 @@ def run_team_research(
         _cb("✅ Historial completado.")
     else:
         _cb("✅ Historial ya disponible — reutilizando.")
+    _save(results)
 
     if not _has_data(results.get("coach")):
         _cb(f"🎯 Investigando entrenador de **{research_name}**...")
@@ -896,6 +906,7 @@ def run_team_research(
         _cb("✅ Entrenador completado.")
     else:
         _cb("✅ Entrenador ya disponible — reutilizando.")
+    _save(results)
 
     if not _has_data(results.get("roster")):
         _cb(f"👥 Investigando plantilla de **{research_name}** jugador por jugador...")
@@ -916,6 +927,7 @@ def run_team_research(
         )
     else:
         _cb(f"✅ Plantilla de **{research_name}** ya disponible — reutilizando.")
+    _save(results)
 
     # --- Formations (Sofascore) ---
     if not results.get("formations"):
@@ -1078,8 +1090,10 @@ def run_national_team_research(
     api_key: str,
     progress_cb: Optional[Callable[[str], None]] = None,
     partial_results: Optional[Dict[str, Any]] = None,
+    on_phase_complete: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
     _cb = progress_cb or (lambda _msg: None)
+    _save = on_phase_complete or (lambda _r: None)
     results: Dict[str, Any] = partial_results or {
         "team_history": ("", []),
         "coach": ("", []),
@@ -1118,6 +1132,7 @@ def run_national_team_research(
         _cb("✅ Historial completado.")
     else:
         _cb("✅ Historial ya disponible — reutilizando.")
+    _save(results)
 
     if not _has_data(results.get("coach")):
         _cb(f"🎯 Investigando seleccionador de **{country}**...")
@@ -1136,6 +1151,7 @@ def run_national_team_research(
         _cb("✅ Seleccionador completado.")
     else:
         _cb("✅ Seleccionador ya disponible — reutilizando.")
+    _save(results)
 
     if not _has_data(results.get("roster")):
         _cb(f"👥 Investigando convocatoria de **{country}**...")
@@ -1158,6 +1174,7 @@ def run_national_team_research(
         )
     else:
         _cb(f"✅ Convocatoria de **{country}** ya disponible — reutilizando.")
+    _save(results)
 
     # --- Formations (Sofascore) ---
     if not results.get("formations"):
@@ -1176,8 +1193,10 @@ def run_national_match_prep(
     progress_cb: Optional[Callable[[str], None]] = None,
     partial_results: Optional[Dict[str, Any]] = None,
     is_womens: bool = False,
+    on_phase_complete: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
     _cb = progress_cb or (lambda _msg: None)
+    _save = on_phase_complete or (lambda _r: None)
     results: Dict[str, Any] = partial_results or {
         "home_history": ("", []),
         "away_history": ("", []),
@@ -1224,6 +1243,7 @@ def run_national_match_prep(
         _cb("✅ Análisis del partido completado.")
     else:
         _cb("✅ Análisis ya disponible — reutilizando.")
+    _save(results)
 
     if not _has_data(results.get("home_roster")):
         _cb(f"👥 Investigando convocatoria de **{research_home}**...")
@@ -1246,6 +1266,7 @@ def run_national_match_prep(
         )
     else:
         _cb(f"✅ Convocatoria de **{research_home}** ya disponible — reutilizando.")
+    _save(results)
 
     if not _has_data(results.get("away_roster")):
         _cb(f"👥 Investigando convocatoria de **{research_away}**...")
@@ -1268,6 +1289,7 @@ def run_national_match_prep(
         )
     else:
         _cb(f"✅ Convocatoria de **{research_away}** ya disponible — reutilizando.")
+    _save(results)
 
     # --- Formations (Sofascore) ---
     if not results.get("home_formations"):
