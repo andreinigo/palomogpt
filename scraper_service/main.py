@@ -168,7 +168,7 @@ def _do_crawl(
             _log(f"team page loaded: {page.url}")
 
             # Extract match links from DOM (SSR-rendered)
-            match_links = _extract_match_links(page, limit, _log)
+            match_links = _extract_match_links(page, team_name, limit, _log)
             _log(f"found {len(match_links)} match links in DOM")
 
             if not match_links:
@@ -204,9 +204,9 @@ def _do_crawl(
             browser.close()
 
 
-def _extract_match_links(page, limit: int, _log) -> list[dict]:
+def _extract_match_links(page, team_name: str, limit: int, _log) -> list[dict]:
     """Extract match links and basic info from the team page DOM."""
-    data = page.evaluate("""(limit) => {
+    data = page.evaluate("""([limit, teamSlug]) => {
         const links = document.querySelectorAll('a[href*="/football/match/"]');
         const seen = new Set();
         const results = [];
@@ -217,6 +217,8 @@ def _extract_match_links(page, limit: int, _log) -> list[dict]:
             // Extract event ID from href hash: #id:14083607
             const idMatch = href.match(/#id:(\\d+)/);
             if (!idMatch) continue;
+            // Filter: match URL should contain team slug
+            if (teamSlug && !href.toLowerCase().includes(teamSlug.toLowerCase())) continue;
             results.push({
                 href: href,
                 event_id: parseInt(idMatch[1]),
@@ -225,8 +227,14 @@ def _extract_match_links(page, limit: int, _log) -> list[dict]:
             if (results.length >= limit * 3) break;
         }
         return results;
-    }""", limit)
+    }""", [limit, _team_slug(page.url)])
     return data or []
+
+
+def _team_slug(url: str) -> str:
+    """Extract team slug from Sofascore URL, e.g. 'real-madrid' from .../real-madrid/2829."""
+    m = re.search(r'/([\w-]+)/\d+$', url.rstrip('/'))
+    return m.group(1) if m else ''
 
 
 def _try_api_events(page, team_id: str, limit: int, _log) -> list[dict]:
@@ -304,26 +312,38 @@ def _scrape_match_lineups(
             break
 
         event_id = ml["event_id"]
-        match_url = f"https://www.sofascore.com{ml['href']}"
-        _log(f"navigating to match {event_id}...")
+        href = ml['href']
+        match_url = href if href.startswith('http') else f"https://www.sofascore.com{href}"
+        _log(f"navigating to match {event_id}: {match_url[:80]}...")
 
+        on_response = None
         try:
             # Set up response interception for lineups
             lineup_data = {}
             lock = threading.Lock()
+            eid = event_id  # capture for closure
 
-            def on_response(resp):
-                if f"/event/{event_id}/lineups" in resp.url and resp.status == 200:
+            def on_response(resp, _eid=eid, _ld=lineup_data, _lk=lock):
+                if f"/event/{_eid}/lineups" in resp.url and resp.status == 200:
                     try:
-                        with lock:
-                            lineup_data["data"] = resp.json()
+                        with _lk:
+                            _ld["data"] = resp.json()
                     except Exception:
                         pass
 
             page.on("response", on_response)
 
             # Navigate to match page
-            page.goto(match_url, wait_until="domcontentloaded")
+            try:
+                page.goto(match_url, wait_until="domcontentloaded")
+            except Exception as nav_exc:
+                _log(f"navigation failed for {event_id}: {str(nav_exc)[:100]}")
+                page.remove_listener("response", on_response)
+                consecutive_failures += 1
+                # Wait a bit and try to recover page state
+                page.wait_for_timeout(1000)
+                continue
+
             page.wait_for_timeout(2000)
 
             # Click Lineups tab
@@ -405,9 +425,13 @@ def _scrape_match_lineups(
                 consecutive_failures += 1
 
         except Exception as exc:
-            _log(f"match {event_id} exception: {exc}")
+            _log(f"match {event_id} exception: {str(exc)[:120]}")
             consecutive_failures += 1
-            page.remove_listener("response", on_response) if "on_response" in dir() else None
+            if on_response:
+                try:
+                    page.remove_listener("response", on_response)
+                except Exception:
+                    pass
 
     return entries
 
