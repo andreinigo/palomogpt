@@ -72,6 +72,34 @@ def health():
     return {"status": "ok"}
 
 
+@app.get("/debug")
+def debug():
+    """Hit Sofascore and return what the browser sees (title + snippet)."""
+    from playwright.sync_api import sync_playwright
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            ctx = browser.new_context(
+                user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                viewport={"width": 1600, "height": 900},
+            )
+            page = ctx.new_page()
+            try:
+                from playwright_stealth import stealth_sync
+                stealth_sync(page)
+            except ImportError:
+                pass
+            page.goto("https://www.sofascore.com", wait_until="domcontentloaded", timeout=20000)
+            page.wait_for_timeout(3000)
+            title = page.title()
+            body = page.locator("body").inner_text(timeout=5000)[:500]
+            ctx.close()
+            browser.close()
+        return {"title": title, "body_snippet": body}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
 @app.post("/crawl", response_model=CrawlResponse)
 def crawl(req: CrawlRequest, authorization: str | None = Header(default=None)):
     _check_auth(authorization)
