@@ -545,6 +545,8 @@ def crawl_team_lineups(
     headless: bool = True,
 ) -> list[MatchLineup]:
     output_dir.mkdir(parents=True, exist_ok=True)
+    import time as _time
+    t0 = _time.time()
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=headless)
@@ -553,19 +555,24 @@ def crawl_team_lineups(
         page.set_default_timeout(12000)
         page.set_default_navigation_timeout(20000)
 
+        print(f"[crawler] [{_time.time()-t0:.1f}s] resolving team URL...", flush=True)
         team_page_url = resolve_team_url(page, team_query=team_query, team_url=team_url)
+        print(f"[crawler] [{_time.time()-t0:.1f}s] team URL: {team_page_url}", flush=True)
         page.goto(team_page_url, wait_until="domcontentloaded")
         dismiss_overlays(page)
         wait_short(page, 1200)
 
+        print(f"[crawler] [{_time.time()-t0:.1f}s] collecting match URLs...", flush=True)
         match_urls = collect_match_urls(page, needed=limit)
+        print(f"[crawler] [{_time.time()-t0:.1f}s] found {len(match_urls)} match URLs", flush=True)
         if not match_urls:
             raise SofascoreCrawlerError("No pude extraer URLs de partidos desde la pestaña de resultados.")
 
         saved: list[MatchLineup] = []
-        for url in match_urls:
+        for idx, url in enumerate(match_urls):
             if len(saved) >= limit:
                 break
+            print(f"[crawler] [{_time.time()-t0:.1f}s] processing match {idx+1}/{len(match_urls)}: {url}", flush=True)
             try:
                 result = process_match(
                     page=page,

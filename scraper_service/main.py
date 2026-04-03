@@ -149,7 +149,10 @@ def debug(team_url: str = "https://www.sofascore.com/team/football/real-madrid/2
 
 @app.post("/crawl", response_model=CrawlResponse)
 def crawl(req: CrawlRequest, authorization: str | None = Header(default=None)):
+    import time as _time
     _check_auth(authorization)
+    t0 = _time.time()
+    print(f"[crawl] START team={req.team_name!r} limit={req.limit} team_url={req.team_url!r}", flush=True)
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="scraper_"))
     try:
@@ -160,6 +163,7 @@ def crawl(req: CrawlRequest, authorization: str | None = Header(default=None)):
             team_url=req.team_url,
             headless=True,
         )
+        print(f"[crawl] [{_time.time()-t0:.1f}s] got {len(lineups)} lineups", flush=True)
 
         entries: list[FormationEntry] = []
         for lu in lineups:
@@ -183,12 +187,14 @@ def crawl(req: CrawlRequest, authorization: str | None = Header(default=None)):
                 image_base64=img_b64,
             ))
 
+        print(f"[crawl] [{_time.time()-t0:.1f}s] DONE count={len(entries)}", flush=True)
         return CrawlResponse(
             team_name=req.team_name,
             count=len(entries),
             formations=entries,
         )
     except Exception as exc:
+        print(f"[crawl] [{_time.time()-t0:.1f}s] ERROR: {exc}", flush=True)
         raise HTTPException(status_code=500, detail=str(exc))
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -200,4 +206,4 @@ if __name__ == "__main__":
     import uvicorn
 
     port = int(os.getenv("PORT", "8000"))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=port, timeout_keep_alive=300)
