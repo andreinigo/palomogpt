@@ -177,7 +177,6 @@ def crawl(req: CrawlRequest, authorization: str | None = Header(default=None)):
                     "--disable-gpu",
                     "--disable-dev-shm-usage",
                     "--disable-software-rasterizer",
-                    "--single-process",
                 ],
             )
             context = build_context(browser)
@@ -211,7 +210,10 @@ def crawl(req: CrawlRequest, authorization: str | None = Header(default=None)):
 
             print(f"[crawl] [{_time.time()-t0:.1f}s] found {len(match_urls)} match URLs", flush=True)
 
-            # Process matches
+            # Close the page used for URL collection to free memory
+            page.close()
+
+            # Process matches — fresh page per match to avoid memory buildup
             entries: list[FormationEntry] = []
             for idx, match_url in enumerate(match_urls):
                 if len(entries) >= req.limit:
@@ -220,9 +222,12 @@ def crawl(req: CrawlRequest, authorization: str | None = Header(default=None)):
                     print(f"[crawl] [{_time.time()-t0:.1f}s] time limit reached, returning {len(entries)} results", flush=True)
                     break
                 print(f"[crawl] [{_time.time()-t0:.1f}s] match {idx+1}: {match_url}", flush=True)
+                match_page = _new_stealth_page(context)
+                match_page.set_default_timeout(15000)
+                match_page.set_default_navigation_timeout(25000)
                 try:
                     result = process_match(
-                        page=page,
+                        page=match_page,
                         match_url=match_url,
                         team_query=req.team_name,
                         output_dir=tmp_dir,
@@ -253,7 +258,8 @@ def crawl(req: CrawlRequest, authorization: str | None = Header(default=None)):
                     print(f"[crawl] [{_time.time()-t0:.1f}s] ✓ {result.formation} vs {result.opponent}", flush=True)
                 except Exception as exc:
                     print(f"[crawl] [{_time.time()-t0:.1f}s] ✗ skip: {exc}", flush=True)
-                    continue
+                finally:
+                    match_page.close()
 
             context.close()
             browser.close()
