@@ -73,16 +73,18 @@ def health():
 
 
 @app.get("/debug")
-def debug(team: str = "Real Madrid", team_url: str = ""):
-    """Debug: test search or direct team page navigation."""
+def debug(team_url: str = "https://www.sofascore.com/team/football/real-madrid/2829"):
+    """Debug: navigate to team page, find matches, try processing first match."""
     from playwright.sync_api import sync_playwright
+    import time as _time
     log: list[str] = []
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             ctx = browser.new_context(
                 user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-                viewport={"width": 1600, "height": 900},
+                viewport={"width": 1600, "height": 2200},
+                color_scheme="dark",
             )
             page = ctx.new_page()
             try:
@@ -90,62 +92,55 @@ def debug(team: str = "Real Madrid", team_url: str = ""):
                 stealth_sync(page)
             except ImportError:
                 pass
+            page.set_default_timeout(12000)
+            page.set_default_navigation_timeout(20000)
 
-            if team_url:
-                log.append(f"goto team_url: {team_url}")
-                page.goto(team_url, wait_until="domcontentloaded", timeout=20000)
-                page.wait_for_timeout(3000)
-                log.append(f"title: {page.title()}")
-                body = page.locator("body").inner_text(timeout=5000)[:300]
-                log.append(f"body: {body}")
+            t0 = _time.time()
+            page.goto(team_url, wait_until="domcontentloaded", timeout=20000)
+            page.wait_for_timeout(2000)
+            log.append(f"[{_time.time()-t0:.1f}s] team page loaded: {page.title()}")
 
-                match_links = page.locator("a[href*='/football/match/']")
-                count = match_links.count()
-                log.append(f"match links found: {count}")
-                for i in range(min(count, 5)):
-                    try:
-                        href = match_links.nth(i).get_attribute("href") or ""
-                        log.append(f"  [{i}] {href}")
-                    except Exception:
-                        pass
-            else:
-                log.append("goto sofascore...")
-                page.goto("https://www.sofascore.com", wait_until="domcontentloaded", timeout=20000)
+            # Try clicking Matches/Results tabs
+            from sofascore_formations_crawler import click_tab_if_present, dismiss_overlays
+            dismiss_overlays(page)
+            click_tab_if_present(page, "Matches")
+            click_tab_if_present(page, "Results")
+            log.append(f"[{_time.time()-t0:.1f}s] clicked tabs")
+
+            match_links = page.locator("a[href*='/football/match/']")
+            hrefs = match_links.evaluate_all(
+                "els => els.map(e => e.href || e.getAttribute('href')).filter(Boolean)"
+            )
+            log.append(f"[{_time.time()-t0:.1f}s] found {len(hrefs)} match hrefs")
+
+            if hrefs:
+                match_url = hrefs[0].split("?")[0].split("#")[0]
+                if not match_url.startswith("http"):
+                    match_url = "https://www.sofascore.com" + match_url
+                log.append(f"[{_time.time()-t0:.1f}s] navigating to match: {match_url}")
+                page.goto(match_url, wait_until="domcontentloaded", timeout=20000)
                 page.wait_for_timeout(2000)
-                log.append(f"title: {page.title()}")
+                log.append(f"[{_time.time()-t0:.1f}s] match page title: {page.title()}")
 
-                search_input = None
-                for sel in ["input[placeholder*='Search']", "input[aria-label*='Search']", "input[type='text']", "input"]:
-                    loc = page.locator(sel)
+                # Try lineup tab
+                from sofascore_formations_crawler import ensure_lineups_tab
+                found_tab = ensure_lineups_tab(page)
+                log.append(f"[{_time.time()-t0:.1f}s] lineup tab found: {found_tab}")
+
+                if found_tab:
+                    page.wait_for_timeout(2000)
+                    card_loc = page.locator("div:has(.FootballTerrainHalf__root--side_left):has(.FootballTerrainHalf__root--side_right)").first
                     try:
-                        if loc.count() and loc.first.is_visible():
-                            search_input = loc.first
-                            log.append(f"found search input via: {sel}")
-                            break
-                    except Exception:
-                        continue
-
-                if search_input:
-                    search_input.click()
-                    search_input.fill(team)
-                    page.wait_for_timeout(3000)
-                    log.append(f"typed '{team}' in search, waited 3s")
-
-                    links = page.locator("a[href*='/football/team/']")
-                    count = links.count()
-                    log.append(f"team links found: {count}")
-                    for i in range(min(count, 5)):
-                        try:
-                            href = links.nth(i).get_attribute("href") or ""
-                            text = links.nth(i).inner_text()[:60]
-                            log.append(f"  [{i}] {text} -> {href}")
-                        except Exception:
-                            pass
-                else:
-                    log.append("NO search input found")
+                        card_loc.wait_for(timeout=12000)
+                        log.append(f"[{_time.time()-t0:.1f}s] lineup card found!")
+                        body_snippet = card_loc.inner_text(timeout=5000)[:200]
+                        log.append(f"card text: {body_snippet}")
+                    except Exception as e:
+                        log.append(f"[{_time.time()-t0:.1f}s] lineup card NOT found: {e}")
 
             ctx.close()
             browser.close()
+            log.append(f"[{_time.time()-t0:.1f}s] done")
         return {"log": log}
     except Exception as exc:
         log.append(f"ERROR: {exc}")
