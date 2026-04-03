@@ -250,24 +250,47 @@ def _crawl_via_api(
     import time as _time
     from difflib import SequenceMatcher
 
-    # Fetch last events via API
-    events_data = page.evaluate(f"""
-        async () => {{
-            const resp = await fetch('/api/v1/team/{team_id}/events/last/0');
-            if (!resp.ok) return null;
-            return await resp.json();
-        }}
-    """)
-    if not events_data or "events" not in events_data:
-        raise RuntimeError("API /events/last/0 returned no data")
+    # Fetch last events via API (paginate if needed)
+    all_events: list[dict] = []
+    for page_num in range(3):  # up to 3 pages
+        if _time.time() - t0 > max_seconds:
+            break
+        try:
+            events_data = page.evaluate(f"""
+                async () => {{
+                    const ctrl = new AbortController();
+                    const tid = setTimeout(() => ctrl.abort(), 10000);
+                    try {{
+                        const resp = await fetch('/api/v1/team/{team_id}/events/last/{page_num}', {{signal: ctrl.signal}});
+                        clearTimeout(tid);
+                        if (!resp.ok) return null;
+                        return await resp.json();
+                    }} catch(e) {{ clearTimeout(tid); return null; }}
+                }}
+            """)
+        except Exception as exc:
+            print(f"[api] [{_time.time()-t0:.1f}s] events page {page_num} evaluate failed: {exc}", flush=True)
+            break
 
-    events = events_data["events"]
-    print(f"[api] [{_time.time()-t0:.1f}s] got {len(events)} events from API", flush=True)
+        if not events_data or "events" not in events_data:
+            break
+        page_events = events_data["events"]
+        if not page_events:
+            break
+        all_events.extend(page_events)
+        print(f"[api] [{_time.time()-t0:.1f}s] events page {page_num}: {len(page_events)} events (total: {len(all_events)})", flush=True)
+        # If we already have enough finished events, stop paginating
+        finished_count = sum(1 for e in all_events if e.get("status", {}).get("type") == "finished")
+        if finished_count >= limit * 2:  # 2x buffer for events without lineups
+            break
+
+    if not all_events:
+        raise RuntimeError("API returned no events")
 
     entries: list[FormationEntry] = []
     consecutive_failures = 0
 
-    for event in events:
+    for event in all_events:
         if len(entries) >= limit:
             break
         if _time.time() - t0 > max_seconds:
@@ -285,16 +308,22 @@ def _crawl_via_api(
         if status_type != "finished":
             continue
 
-        # Get lineups via API
+        # Get lineups via API with timeout
         try:
             lineups_data = page.evaluate(f"""
                 async () => {{
-                    const resp = await fetch('/api/v1/event/{event_id}/lineups');
-                    if (!resp.ok) return null;
-                    return await resp.json();
+                    const ctrl = new AbortController();
+                    const tid = setTimeout(() => ctrl.abort(), 10000);
+                    try {{
+                        const resp = await fetch('/api/v1/event/{event_id}/lineups', {{signal: ctrl.signal}});
+                        clearTimeout(tid);
+                        if (!resp.ok) return null;
+                        return await resp.json();
+                    }} catch(e) {{ clearTimeout(tid); return null; }}
                 }}
             """)
-        except Exception:
+        except Exception as exc:
+            print(f"[api] [{_time.time()-t0:.1f}s] lineups evaluate failed for event {event_id}: {exc}", flush=True)
             consecutive_failures += 1
             continue
 
