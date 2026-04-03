@@ -169,7 +169,7 @@ def _render_roster_players(roster: list, expand_key: str = "roster") -> None:
 # ---------------------------------------------------------------------------
 
 def _render_formations(formations: list, team_label: str = "") -> None:
-    """Render Sofascore formation screenshots with summary."""
+    """Render Sofascore formation data with summary."""
     if not formations:
         return
 
@@ -194,6 +194,16 @@ def _render_formations(formations: list, team_label: str = "") -> None:
                     f"({fm.get('match_date', '?')}) — {fm.get('formation', 'N/A')}"
                 )
                 st.image(img, caption=caption, use_container_width=True)
-            with st.expander(f"Jugadores — {fm.get('formation', 'N/A')}"):
+            # Always show a visible card with formation info
+            formation = fm.get("formation", "N/A")
+            opponent = fm.get("opponent", "")
+            match_date = fm.get("match_date", "?")
+            target_side = fm.get("target_side", "")
+            side_label = " (L)" if target_side == "left" else " (V)" if target_side == "right" else ""
+            st.markdown(
+                f"**{formation}**{side_label} vs {opponent}  \n"
+                f"📅 {match_date}"
+            )
+            with st.expander(f"Jugadores — {formation}"):
                 for p in fm.get("players", []):
                     st.markdown(f"- {p}")

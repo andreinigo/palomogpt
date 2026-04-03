@@ -472,12 +472,14 @@ def _display_match_results(config: dict, results: dict) -> None:
     # Formations
     home_fm = results.get("home_formations", [])
     away_fm = results.get("away_formations", [])
-    if home_fm or away_fm:
-        st.markdown("---")
-        if home_fm:
-            _render_formations(home_fm, team_label=home)
-        if away_fm:
-            _render_formations(away_fm, team_label=away)
+    st.markdown("---")
+    if home_fm:
+        _render_formations(home_fm, team_label=home)
+    if away_fm:
+        _render_formations(away_fm, team_label=away)
+    if not home_fm and not away_fm:
+        st.markdown("### ⚽ Parado Táctico")
+        st.info("Las formaciones aún no se han generado. Ejecuta la preparación del partido para obtenerlas.")
 
 
 def _fill_match_roster_gaps(config: dict, results: dict, side: str, api_key: str) -> None:
@@ -725,9 +727,12 @@ def _display_team_research_results(config: dict, results: dict) -> None:
 
     # Formations
     team_fm = results.get("formations", [])
+    st.markdown("---")
     if team_fm:
-        st.markdown("---")
         _render_formations(team_fm, team_label=team)
+    else:
+        st.markdown("### ⚽ Parado Táctico")
+        st.info("Las formaciones aún no se han generado. Ejecuta el análisis del equipo para obtenerlas.")
 
 
 def _fill_team_roster_gaps(config: dict, results: dict, api_key: str) -> None:
