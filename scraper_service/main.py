@@ -154,38 +154,95 @@ def crawl(req: CrawlRequest, authorization: str | None = Header(default=None)):
     t0 = _time.time()
     print(f"[crawl] START team={req.team_name!r} limit={req.limit} team_url={req.team_url!r}", flush=True)
 
+    from playwright.sync_api import sync_playwright
+    from sofascore_formations_crawler import (
+        build_context, _new_stealth_page, resolve_team_url,
+        dismiss_overlays, wait_short, click_tab_if_present,
+        ensure_lineups_tab, process_match,
+    )
+    from urllib.parse import urljoin
+    import re
+
     tmp_dir = Path(tempfile.mkdtemp(prefix="scraper_"))
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+
     try:
-        lineups = crawl_team_lineups(
-            team_query=req.team_name,
-            limit=req.limit,
-            output_dir=tmp_dir,
-            team_url=req.team_url,
-            headless=True,
-        )
-        print(f"[crawl] [{_time.time()-t0:.1f}s] got {len(lineups)} lineups", flush=True)
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = build_context(browser)
+            page = _new_stealth_page(context)
+            page.set_default_timeout(15000)
+            page.set_default_navigation_timeout(25000)
 
-        entries: list[FormationEntry] = []
-        for lu in lineups:
-            d = asdict(lu)
-            img_path = Path(d.get("image_path", ""))
-            img_b64: str | None = None
-            if img_path.exists():
-                img_b64 = base64.b64encode(img_path.read_bytes()).decode()
+            # Resolve team URL
+            team_page_url = req.team_url or resolve_team_url(page, req.team_name)
+            print(f"[crawl] [{_time.time()-t0:.1f}s] team URL: {team_page_url}", flush=True)
 
-            entries.append(FormationEntry(
-                index=d["index"],
-                match_url=d["match_url"],
-                match_date=d.get("match_date"),
-                home_team=d.get("home_team", ""),
-                away_team=d.get("away_team", ""),
-                target_team=d.get("target_team", ""),
-                opponent=d.get("opponent", ""),
-                target_side=d.get("target_side", ""),
-                formation=d.get("formation"),
-                players=d.get("players", []),
-                image_base64=img_b64,
-            ))
+            page.goto(team_page_url, wait_until="domcontentloaded")
+            dismiss_overlays(page)
+            page.wait_for_timeout(2000)
+
+            # Collect match URLs directly (simplified — no scrolling loop)
+            click_tab_if_present(page, "Matches")
+            click_tab_if_present(page, "Results")
+            page.wait_for_timeout(1500)
+
+            hrefs_raw = page.locator("a[href*='/football/match/']").evaluate_all(
+                "els => els.map(e => e.href || e.getAttribute('href')).filter(Boolean)"
+            )
+            seen: set[str] = set()
+            match_urls: list[str] = []
+            for href in hrefs_raw:
+                full = urljoin("https://www.sofascore.com", href.split("?")[0].split("#")[0])
+                if re.search(r"/football/match/", full) and full not in seen:
+                    seen.add(full)
+                    match_urls.append(full)
+
+            print(f"[crawl] [{_time.time()-t0:.1f}s] found {len(match_urls)} match URLs", flush=True)
+
+            # Process matches
+            entries: list[FormationEntry] = []
+            for idx, match_url in enumerate(match_urls):
+                if len(entries) >= req.limit:
+                    break
+                print(f"[crawl] [{_time.time()-t0:.1f}s] match {idx+1}: {match_url}", flush=True)
+                try:
+                    result = process_match(
+                        page=page,
+                        match_url=match_url,
+                        team_query=req.team_name,
+                        output_dir=tmp_dir,
+                        index=len(entries) + 1,
+                    )
+                    if result is None:
+                        continue
+
+                    d = asdict(result)
+                    img_path = Path(d.get("image_path", ""))
+                    img_b64: str | None = None
+                    if img_path.exists():
+                        img_b64 = base64.b64encode(img_path.read_bytes()).decode()
+
+                    entries.append(FormationEntry(
+                        index=d["index"],
+                        match_url=d["match_url"],
+                        match_date=d.get("match_date"),
+                        home_team=d.get("home_team", ""),
+                        away_team=d.get("away_team", ""),
+                        target_team=d.get("target_team", ""),
+                        opponent=d.get("opponent", ""),
+                        target_side=d.get("target_side", ""),
+                        formation=d.get("formation"),
+                        players=d.get("players", []),
+                        image_base64=img_b64,
+                    ))
+                    print(f"[crawl] [{_time.time()-t0:.1f}s] ✓ {result.formation} vs {result.opponent}", flush=True)
+                except Exception as exc:
+                    print(f"[crawl] [{_time.time()-t0:.1f}s] ✗ skip: {exc}", flush=True)
+                    continue
+
+            context.close()
+            browser.close()
 
         print(f"[crawl] [{_time.time()-t0:.1f}s] DONE count={len(entries)}", flush=True)
         return CrawlResponse(
