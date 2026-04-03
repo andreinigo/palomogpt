@@ -164,7 +164,8 @@ BROWSER_ARGS = [
 ]
 
 # Hard timeout for the entire crawl operation (seconds).
-CRAWL_TIMEOUT = 150
+# Must allow time for up to 2 attempts with browser relaunch.
+CRAWL_TIMEOUT = 250
 
 
 # ── request / response models ────────────────────────────────────────────
@@ -318,6 +319,14 @@ def _do_crawl_attempt(
         page.set_default_navigation_timeout(20000)
 
         try:
+            # Warmup: visit sofascore.com first to establish cookies/tokens
+            try:
+                page.goto("https://www.sofascore.com/", wait_until="domcontentloaded")
+                page.wait_for_timeout(2000)
+                dismiss_overlays(page)
+            except Exception:
+                pass  # non-critical
+
             # Resolve team URL
             if team_url:
                 team_page_url = team_url
@@ -500,7 +509,7 @@ def _scrape_match_lineups(
     for ml in match_links:
         if len(entries) >= limit:
             break
-        if consecutive_failures >= 5:
+        if consecutive_failures >= 3:
             _log("too many DOM scraping failures, stopping")
             break
 

@@ -67,7 +67,7 @@ def _crawl_formations(team_name: str, limit: int = 10) -> list[dict]:
                 f"{scraper_url.rstrip('/')}/crawl",
                 json={"team_name": team_name, "limit": limit},
                 headers=headers,
-                timeout=180,
+                timeout=300,
             )
             resp.raise_for_status()
             data = resp.json()
