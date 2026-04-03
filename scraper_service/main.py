@@ -18,11 +18,6 @@ from typing import Optional
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
-# The crawler lives one directory up — we add it to sys.path at import time.
-import sys
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
 from sofascore_formations_crawler import crawl_team_lineups  # noqa: E402
 
 app = FastAPI(title="Sofascore Scraper Service")
