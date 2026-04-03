@@ -180,9 +180,9 @@ def _fetch_events(page, team_id: str, limit: int, t0: float) -> list[dict]:
                 """async ([teamId, pageNum]) => {
                     try {
                         const resp = await fetch(`/api/v1/team/${teamId}/events/last/${pageNum}`);
-                        if (!resp.ok) return null;
+                        if (!resp.ok) return {error: resp.status};
                         return await resp.json();
-                    } catch(e) { return null; }
+                    } catch(e) { return {error: e.message}; }
                 }""",
                 [team_id, page_num],
             )
@@ -190,7 +190,13 @@ def _fetch_events(page, team_id: str, limit: int, t0: float) -> list[dict]:
             print(f"[api] [{_time.time()-t0:.1f}s] events page {page_num} failed: {exc}", flush=True)
             break
 
-        if not data or "events" not in data:
+        if not data:
+            print(f"[api] [{_time.time()-t0:.1f}s] events page {page_num}: null response", flush=True)
+            break
+        if "error" in data:
+            print(f"[api] [{_time.time()-t0:.1f}s] events page {page_num}: error={data['error']}", flush=True)
+            break
+        if "events" not in data:
             break
 
         page_events = data["events"]
@@ -235,9 +241,9 @@ def _fetch_lineups(
                 """async (eventId) => {
                     try {
                         const resp = await fetch(`/api/v1/event/${eventId}/lineups`);
-                        if (!resp.ok) return null;
+                        if (!resp.ok) return {error: resp.status};
                         return await resp.json();
-                    } catch(e) { return null; }
+                    } catch(e) { return {error: e.message}; }
                 }""",
                 event_id,
             )
@@ -247,6 +253,11 @@ def _fetch_lineups(
             continue
 
         if not lineups:
+            print(f"[api] [{_time.time()-t0:.1f}s] lineups null for {event_id}", flush=True)
+            consecutive_failures += 1
+            continue
+        if "error" in lineups:
+            print(f"[api] [{_time.time()-t0:.1f}s] lineups error for {event_id}: {lineups['error']}", flush=True)
             consecutive_failures += 1
             continue
 
