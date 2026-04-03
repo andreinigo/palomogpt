@@ -150,8 +150,10 @@ def debug(team_url: str = "https://www.sofascore.com/team/football/real-madrid/2
 @app.post("/crawl", response_model=CrawlResponse)
 def crawl(req: CrawlRequest, authorization: str | None = Header(default=None)):
     import time as _time
+    import signal
     _check_auth(authorization)
     t0 = _time.time()
+    MAX_SECONDS = 240  # 4 minute hard cap
     print(f"[crawl] START team={req.team_name!r} limit={req.limit} team_url={req.team_url!r}", flush=True)
 
     from playwright.sync_api import sync_playwright
@@ -204,6 +206,9 @@ def crawl(req: CrawlRequest, authorization: str | None = Header(default=None)):
             entries: list[FormationEntry] = []
             for idx, match_url in enumerate(match_urls):
                 if len(entries) >= req.limit:
+                    break
+                if _time.time() - t0 > MAX_SECONDS:
+                    print(f"[crawl] [{_time.time()-t0:.1f}s] time limit reached, returning {len(entries)} results", flush=True)
                     break
                 print(f"[crawl] [{_time.time()-t0:.1f}s] match {idx+1}: {match_url}", flush=True)
                 try:
@@ -263,4 +268,4 @@ if __name__ == "__main__":
     import uvicorn
 
     port = int(os.getenv("PORT", "8000"))
-    uvicorn.run(app, host="0.0.0.0", port=port, timeout_keep_alive=300)
+    uvicorn.run(app, host="0.0.0.0", port=port, timeout_keep_alive=300, workers=2)
