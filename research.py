@@ -44,11 +44,47 @@ from database import _find_existing_team_research
 # ---------------------------------------------------------------------------
 
 def _crawl_formations(team_name: str, limit: int = 10) -> list[dict]:
-    """Crawl recent formations from Sofascore. Returns list of dicts with
-    formation, players, and image_bytes.  Non-blocking: returns [] on any error."""
+    """Fetch recent formations via the scraper micro-service (Railway).
+    Falls back to local Playwright if SCRAPER_URL is not configured.
+    Returns list of dicts with formation, players, and image_bytes."""
+    import base64, requests
+
+    # --- Try remote scraper service first ---
+    try:
+        import streamlit as _st
+        scraper_url = _st.secrets.get("SCRAPER_URL", "")
+        scraper_key = _st.secrets.get("SCRAPER_API_KEY", "")
+    except Exception:
+        scraper_url = ""
+        scraper_key = ""
+
+    if scraper_url:
+        try:
+            headers = {}
+            if scraper_key:
+                headers["Authorization"] = f"Bearer {scraper_key}"
+            resp = requests.post(
+                f"{scraper_url.rstrip('/')}/crawl",
+                json={"team_name": team_name, "limit": limit},
+                headers=headers,
+                timeout=180,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            results: list[dict] = []
+            for entry in data.get("formations", []):
+                img_b64 = entry.pop("image_base64", None)
+                entry["image_bytes"] = base64.b64decode(img_b64) if img_b64 else None
+                results.append(entry)
+            return results
+        except Exception as exc:
+            print(f"[formations] Remote scraper error for {team_name}: {exc}")
+            # fall through to local attempt
+
+    # --- Fallback: local Playwright ---
     import tempfile, shutil
     try:
-        from sofascore_formations_crawler import crawl_team_lineups, MatchLineup
+        from sofascore_formations_crawler import crawl_team_lineups
         from dataclasses import asdict
         from pathlib import Path
     except ImportError:
@@ -62,7 +98,7 @@ def _crawl_formations(team_name: str, limit: int = 10) -> list[dict]:
             output_dir=tmp_dir,
             headless=True,
         )
-        results: list[dict] = []
+        results = []
         for lu in lineups:
             entry = asdict(lu)
             img_path = Path(entry.get("image_path", ""))
