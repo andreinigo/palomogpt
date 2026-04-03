@@ -1,14 +1,10 @@
-"""Scraper micro-service for Sofascore formations.
+"""Scraper micro-service for football formations.
 
-Deployed on Railway with Playwright + Chromium pre-installed (see Dockerfile).
+Deployed on Railway.
 
 Strategy:
-1. Open headless browser, navigate to Sofascore team page
-2. Use page.evaluate(fetch) to call Sofascore internal API (has session context)
-3. Close browser, return structured formation data
-
-The browser's fetch shares the same anti-bot tokens/cookies that Sofascore sets
-via JavaScript, which is why httpx/requests with extracted cookies doesn't work.
+1. Try API-Football.com first (fast, works from any IP).
+2. Fall back to Sofascore browser scraping if API-Football fails.
 """
 
 from __future__ import annotations
@@ -151,9 +147,10 @@ def _lookup_team_url(team_name: str) -> str | None:
 
     return None
 
-app = FastAPI(title="Sofascore Scraper Service")
+app = FastAPI(title="Football Formations Scraper")
 
 _API_KEY = os.getenv("SCRAPER_API_KEY", "")
+_APIFOOTBALL_KEY = os.getenv("APIFOOTBALL_KEY", "")
 _EXECUTOR = ThreadPoolExecutor(max_workers=1)
 
 BROWSER_ARGS = [
@@ -166,6 +163,8 @@ BROWSER_ARGS = [
 # Hard timeout for the entire crawl operation (seconds).
 # Must allow time for up to 2 attempts with browser relaunch.
 CRAWL_TIMEOUT = 250
+
+_APIFOOTBALL_BASE = "https://v3.football.api-sports.io"
 
 
 # ── request / response models ────────────────────────────────────────────
@@ -251,20 +250,7 @@ def _do_crawl(
     limit: int,
     team_url: str | None,
 ) -> tuple[list[FormationEntry], list[str]]:
-    """Run the full crawl pipeline inside Playwright.
-
-    Strategy (April 2026):
-    1. Resolve team URL via known mapping → Google → Sofascore search.
-    2. Try fast API path (page.evaluate(fetch)) — works when anti-bot allows.
-    3. Fallback: navigate to each match page, click Lineups tab, intercept
-       the lineup API response from the page's own React code.
-    4. If first attempt returns 0 results, retry once with fresh browser.
-    """
-    from playwright.sync_api import sync_playwright
-    from sofascore_formations_crawler import (
-        build_context, _new_stealth_page, resolve_team_url, dismiss_overlays,
-    )
-
+    """Fetch formations via API-Football first, then fall back to Sofascore."""
     t0 = _time.time()
     log: list[str] = []
 
@@ -273,6 +259,21 @@ def _do_crawl(
         log.append(line)
         print(f"[crawl] {line}", flush=True)
 
+    # ── 1. Try API-Football (fast, works from datacenter IPs) ─────────
+    if _APIFOOTBALL_KEY:
+        _log("trying API-Football…")
+        try:
+            entries = _apifootball_formations(team_name, limit, _log)
+            if entries:
+                _log(f"API-Football SUCCESS: {len(entries)} formations")
+                return entries, log
+            _log("API-Football returned 0 formations, falling back to Sofascore")
+        except Exception as exc:
+            _log(f"API-Football error: {exc}")
+    else:
+        _log("APIFOOTBALL_KEY not set, skipping API-Football")
+
+    # ── 2. Fall back to Sofascore browser scraping ────────────────────
     # Resolve team URL upfront (before browser, uses mapping)
     if not team_url:
         mapped = _lookup_team_url(team_name)
@@ -296,6 +297,199 @@ def _do_crawl(
 
     _log(f"DONE count=0 after {max_attempts} attempts")
     return [], log
+
+
+# ── API-Football.com integration ──────────────────────────────────────────
+
+def _apifootball_formations(
+    team_name: str,
+    limit: int,
+    _log,
+) -> list[FormationEntry]:
+    """Fetch recent formations from API-Football.com.
+
+    Free plan: 100 req/day, seasons 2022-2024.
+    Cost per team: 1 (search) + 1 (fixtures) + N (lineups) ≈ limit + 2.
+    """
+    import requests as _req
+
+    headers = {"x-apisports-key": _APIFOOTBALL_KEY}
+
+    # 1. Resolve team ID
+    team_id = _apifootball_resolve_team(team_name, headers, _log)
+    if not team_id:
+        return []
+
+    # 2. Get finished fixtures (most recent season available)
+    fixtures = _apifootball_fixtures(team_id, headers, _log)
+    if not fixtures:
+        return []
+
+    # 3. Fetch lineups for each fixture
+    entries: list[FormationEntry] = []
+    failures = 0
+    # Take the most recent fixtures first
+    for fx in fixtures:
+        if len(entries) >= limit:
+            break
+        if failures >= 3:
+            _log("too many lineup failures, stopping")
+            break
+        fixture_id = fx["fixture"]["id"]
+        entry = _apifootball_lineup(
+            fixture_id, fx, team_name, team_id,
+            len(entries) + 1, headers, _log,
+        )
+        if entry:
+            entries.append(entry)
+            failures = 0
+        else:
+            failures += 1
+
+    return entries
+
+
+def _apifootball_resolve_team(
+    team_name: str, headers: dict, _log,
+) -> int | None:
+    """Search API-Football for a team and return its ID."""
+    import requests as _req
+
+    name = team_name.strip()
+    # Strip women's team suffix for search
+    name = re.sub(r"\s*\(equipo femenino\)\s*$", "", name, flags=re.I)
+
+    resp = _req.get(
+        f"{_APIFOOTBALL_BASE}/teams",
+        headers=headers,
+        params={"search": name},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+
+    if data.get("errors"):
+        _log(f"API-Football search errors: {data['errors']}")
+        return None
+
+    teams = data.get("response", [])
+    if not teams:
+        _log(f"API-Football: no team found for '{name}'")
+        return None
+
+    # Pick best match by name similarity
+    best_id, best_score, best_name = None, 0.0, ""
+    for t in teams:
+        tm = t["team"]
+        score = SequenceMatcher(None, name.lower(), tm["name"].lower()).ratio()
+        if score > best_score:
+            best_score = score
+            best_id = tm["id"]
+            best_name = tm["name"]
+
+    _log(f"API-Football team: {best_name} (id={best_id}, score={best_score:.2f})")
+    return best_id
+
+
+def _apifootball_fixtures(
+    team_id: int, headers: dict, _log,
+) -> list[dict]:
+    """Get the most recent finished fixtures for a team."""
+    import requests as _req
+
+    # Try latest available season (free plan: 2022-2024)
+    for season in (2024, 2023, 2022):
+        resp = _req.get(
+            f"{_APIFOOTBALL_BASE}/fixtures",
+            headers=headers,
+            params={"team": team_id, "season": season, "status": "FT"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("errors"):
+            _log(f"API-Football fixtures errors (season={season}): {data['errors']}")
+            continue
+        fixtures = data.get("response", [])
+        if fixtures:
+            # Sort by date descending (most recent first)
+            fixtures.sort(
+                key=lambda f: f["fixture"].get("date", ""), reverse=True,
+            )
+            _log(f"API-Football: {len(fixtures)} fixtures (season={season})")
+            return fixtures
+
+    _log("API-Football: no fixtures found")
+    return []
+
+
+def _apifootball_lineup(
+    fixture_id: int,
+    fixture_data: dict,
+    team_name: str,
+    team_id: int,
+    index: int,
+    headers: dict,
+    _log,
+) -> FormationEntry | None:
+    """Fetch lineup for a single fixture and build a FormationEntry."""
+    import requests as _req
+
+    resp = _req.get(
+        f"{_APIFOOTBALL_BASE}/fixtures/lineups",
+        headers=headers,
+        params={"fixture": fixture_id},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+
+    lineups = data.get("response", [])
+    if not lineups:
+        return None
+
+    # Find our team's lineup
+    target_lineup = None
+    for lu in lineups:
+        if lu["team"]["id"] == team_id:
+            target_lineup = lu
+            break
+
+    if not target_lineup or not target_lineup.get("formation"):
+        return None
+
+    # Extract data
+    fx = fixture_data["fixture"]
+    teams = fixture_data["teams"]
+    home_name = teams["home"]["name"]
+    away_name = teams["away"]["name"]
+    is_home = teams["home"]["id"] == team_id
+    opponent = away_name if is_home else home_name
+
+    formation = target_lineup["formation"]
+    starters = target_lineup.get("startXI", [])
+    player_names = [
+        f"{p['player'].get('number', '')} {p['player']['name']}"
+        for p in starters
+        if p.get("player", {}).get("name")
+    ]
+
+    match_date = fx.get("date", "")[:10] or None
+    match_url = f"https://www.sofascore.com/"  # No direct Sofascore link
+
+    return FormationEntry(
+        index=index,
+        match_url=match_url,
+        match_date=match_date,
+        home_team=home_name,
+        away_team=away_name,
+        target_team=home_name if is_home else away_name,
+        opponent=opponent,
+        target_side="left" if is_home else "right",
+        formation=formation,
+        players=player_names,
+        image_base64=None,
+    )
 
 
 def _do_crawl_attempt(
