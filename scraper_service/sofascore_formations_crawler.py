@@ -159,9 +159,52 @@ def choose_best_team_result(page: Page, team_query: str) -> str:
     return candidates[0][2]
 
 
+def _resolve_team_url_via_google(page: Page, team_query: str) -> Optional[str]:
+    """Use Google to find the Sofascore team URL, bypassing Sofascore's own search."""
+    import re as _re
+    try:
+        q = f"site:sofascore.com/team/football {team_query}"
+        page.goto(
+            f"https://www.google.com/search?q={q}&num=5",
+            wait_until="domcontentloaded",
+            timeout=15000,
+        )
+        page.wait_for_timeout(2000)
+
+        # Extract all sofascore team URLs from Google results
+        links = page.locator("a[href*='sofascore.com/team/football/']")
+        candidates: list[tuple[float, str]] = []
+        for i in range(min(links.count(), 10)):
+            try:
+                href = links.nth(i).get_attribute("href") or ""
+                # Clean up Google redirect URLs
+                if "url?q=" in href:
+                    href = href.split("url?q=")[1].split("&")[0]
+                if "/team/football/" in href:
+                    score = similarity(href, team_query)
+                    candidates.append((score, href))
+            except Exception:
+                continue
+
+        if candidates:
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            url = candidates[0][1].split("?")[0].split("#")[0]
+            if not url.startswith("http"):
+                url = "https://www.sofascore.com" + url
+            return url
+    except Exception as exc:
+        print(f"[google-resolve] {exc}")
+    return None
+
+
 def resolve_team_url(page: Page, team_query: str, team_url: Optional[str] = None) -> str:
     if team_url:
         return team_url
+    # Try Google first (works from datacenters where Sofascore search fails)
+    google_url = _resolve_team_url_via_google(page, team_query)
+    if google_url:
+        return google_url
+    # Fall back to Sofascore's own search
     page.goto(BASE_URL, wait_until="domcontentloaded")
     dismiss_overlays(page)
     return choose_best_team_result(page, team_query)
