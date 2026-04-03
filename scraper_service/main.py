@@ -31,6 +31,7 @@ _API_KEY = os.getenv("SCRAPER_API_KEY", "")
 class CrawlRequest(BaseModel):
     team_name: str = Field(..., min_length=1, max_length=200)
     limit: int = Field(default=10, ge=1, le=30)
+    team_url: Optional[str] = Field(default=None, description="Direct Sofascore team URL — bypasses search")
 
 
 class FormationEntry(BaseModel):
@@ -81,6 +82,7 @@ def crawl(req: CrawlRequest, authorization: str | None = Header(default=None)):
             team_query=req.team_name,
             limit=req.limit,
             output_dir=tmp_dir,
+            team_url=req.team_url,
             headless=True,
         )
 

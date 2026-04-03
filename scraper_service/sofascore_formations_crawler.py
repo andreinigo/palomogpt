@@ -482,6 +482,17 @@ def build_context(browser: Browser, headless_locale: str = "en-US") -> BrowserCo
     )
 
 
+def _new_stealth_page(context: BrowserContext) -> Page:
+    """Create a new page with stealth patches applied (if available)."""
+    page = context.new_page()
+    try:
+        from playwright_stealth import stealth_sync
+        stealth_sync(page)
+    except ImportError:
+        pass
+    return page
+
+
 def crawl_team_lineups(
     team_query: str,
     limit: int,
@@ -495,7 +506,7 @@ def crawl_team_lineups(
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=headless)
         context = build_context(browser)
-        page = context.new_page()
+        page = _new_stealth_page(context)
         page.set_default_timeout(12000)
         page.set_default_navigation_timeout(20000)
 
