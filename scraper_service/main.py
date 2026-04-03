@@ -23,6 +23,134 @@ from typing import Optional
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
+# ── Known Sofascore team slug→ID mapping ──────────────────────────────────
+# Used to resolve team names without relying on Google/Sofascore search
+# (which fails from datacenter IPs).  slug → numeric ID.
+_TEAM_IDS: dict[str, int] = {
+    # La Liga
+    "barcelona": 2817, "real-madrid": 2829, "villarreal": 2819,
+    "atletico-madrid": 2836, "real-betis": 2816, "celta-vigo": 2821,
+    "real-sociedad": 2824, "athletic-club": 2825, "sevilla": 2833,
+    "valencia": 2828, "getafe": 2859, "osasuna": 2820, "mallorca": 2826,
+    "girona-fc": 24264, "rayo-vallecano": 2818, "deportivo-alaves": 2885,
+    "espanyol": 2814, "levante-ud": 2849, "elche": 2846, "real-oviedo": 2851,
+    # Premier League
+    "arsenal": 42, "liverpool": 44, "manchester-city": 17,
+    "manchester-united": 35, "chelsea": 38, "tottenham-hotspur": 33,
+    "newcastle-united": 39, "aston-villa": 40, "west-ham-united": 37,
+    "brighton-and-hove-albion": 30, "wolverhampton": 3, "bournemouth": 60,
+    "fulham": 43, "crystal-palace": 7, "brentford": 50, "everton": 48,
+    "nottingham-forest": 14,
+    # Bundesliga
+    "fc-bayern-munchen": 2672, "borussia-dortmund": 2673,
+    "bayer-04-leverkusen": 2681, "rb-leipzig": 36360,
+    "eintracht-frankfurt": 2674, "vfb-stuttgart": 2677,
+    "sc-freiburg": 2538, "vfl-wolfsburg": 2524,
+    "tsg-hoffenheim": 2569, "fc-augsburg": 2600,
+    "1-fsv-mainz-05": 2556, "sv-werder-bremen": 2534,
+    "borussia-mgladbach": 2527, "fc-st-pauli": 2526,
+    "1-fc-union-berlin": 2547, "1-fc-heidenheim": 5885,
+    # Serie A
+    "inter": 2697, "milan": 2692, "juventus": 2687, "napoli": 2714,
+    "atalanta": 2686, "roma": 2702, "lazio": 2699, "fiorentina": 2693,
+    "bologna": 2685, "torino": 2696, "udinese": 2695,
+    # Ligue 1
+    "paris-saint-germain": 1644, "olympique-de-marseille": 1641,
+    "as-monaco": 1653, "lille": 1643, "olympique-lyonnais": 1649,
+    "nice": 1661, "stade-rennais": 1658, "rc-lens": 1648,
+    "stade-brestois": 1715,
+    # Portugal
+    "benfica": 3006, "fc-porto": 3002, "sporting": 3001,
+    "sporting-braga": 2999,
+    # Netherlands
+    "ajax": 2953, "psv-eindhoven": 2952, "feyenoord": 2959,
+    # National teams
+    "spain": 4687, "germany": 4711, "france": 4481, "england": 4713,
+    "brazil": 4230, "argentina": 4819, "italy": 4707, "portugal": 4704,
+    "netherlands": 4708, "belgium": 4717, "colombia": 4753,
+    "uruguay": 4724, "mexico": 4535, "usa": 4837, "croatia": 4715,
+    "japan": 4387, "south-korea": 4342, "poland": 4703,
+    "switzerland": 4699, "denmark": 4476, "austria": 4697,
+    "sweden": 4694, "chile": 4761, "ecuador": 4757, "peru": 4765,
+    "costa-rica": 4775, "honduras": 4793, "panama": 4773,
+    "paraguay": 4769, "venezuela": 4755, "bolivia": 4759,
+}
+
+# Friendly name → slug mapping for fuzzy lookup
+_NAME_TO_SLUG: dict[str, str] = {}
+for _slug in _TEAM_IDS:
+    # "real-madrid" → "real madrid", "fc-bayern-munchen" → "fc bayern munchen"
+    _NAME_TO_SLUG[_slug.replace("-", " ")] = _slug
+
+
+def _lookup_team_url(team_name: str) -> str | None:
+    """Resolve a team name to a Sofascore URL using the known mapping."""
+    name = team_name.lower().strip()
+    # Strip women's team suffix
+    name = re.sub(r"\s*\(equipo femenino\)\s*$", "", name)
+
+    # 1. Try exact slug match  (e.g. "real-madrid")
+    if name.replace(" ", "-") in _TEAM_IDS:
+        slug = name.replace(" ", "-")
+        return f"https://www.sofascore.com/team/football/{slug}/{_TEAM_IDS[slug]}"
+
+    # 2. Try exact friendly-name match
+    if name in _NAME_TO_SLUG:
+        slug = _NAME_TO_SLUG[name]
+        return f"https://www.sofascore.com/team/football/{slug}/{_TEAM_IDS[slug]}"
+
+    # 3. Common aliases
+    _ALIASES: dict[str, str] = {
+        "atletico": "atletico-madrid", "atlético": "atletico-madrid",
+        "atlético madrid": "atletico-madrid", "atletico de madrid": "atletico-madrid",
+        "real": "real-madrid", "barça": "barcelona", "barca": "barcelona",
+        "betis": "real-betis", "sociedad": "real-sociedad",
+        "athletic": "athletic-club", "athletic bilbao": "athletic-club",
+        "man city": "manchester-city", "man united": "manchester-united",
+        "man utd": "manchester-united", "spurs": "tottenham-hotspur",
+        "tottenham": "tottenham-hotspur", "wolves": "wolverhampton",
+        "bayern": "fc-bayern-munchen", "bayern munich": "fc-bayern-munchen",
+        "bayern munchen": "fc-bayern-munchen", "bayern münchen": "fc-bayern-munchen",
+        "dortmund": "borussia-dortmund", "leverkusen": "bayer-04-leverkusen",
+        "leipzig": "rb-leipzig", "frankfurt": "eintracht-frankfurt",
+        "stuttgart": "vfb-stuttgart", "freiburg": "sc-freiburg",
+        "wolfsburg": "vfl-wolfsburg", "hoffenheim": "tsg-hoffenheim",
+        "mainz": "1-fsv-mainz-05", "werder": "sv-werder-bremen",
+        "werder bremen": "sv-werder-bremen",
+        "gladbach": "borussia-mgladbach", "monchengladbach": "borussia-mgladbach",
+        "psg": "paris-saint-germain", "paris": "paris-saint-germain",
+        "marseille": "olympique-de-marseille", "lyon": "olympique-lyonnais",
+        "monaco": "as-monaco", "lens": "rc-lens", "rennes": "stade-rennais",
+        "brest": "stade-brestois",
+        "psv": "psv-eindhoven",
+        "porto": "fc-porto", "braga": "sporting-braga",
+        "ac milan": "milan",
+        "españa": "spain", "alemania": "germany", "francia": "france",
+        "inglaterra": "england", "brasil": "brazil",
+        "holanda": "netherlands", "paises bajos": "netherlands",
+        "belgica": "belgium", "bélgica": "belgium",
+        "estados unidos": "usa", "eeuu": "usa",
+        "corea del sur": "south-korea", "corea": "south-korea",
+        "japon": "japan", "japón": "japan",
+        "suiza": "switzerland", "dinamarca": "denmark",
+        "suecia": "sweden", "croacia": "croatia",
+    }
+    if name in _ALIASES:
+        slug = _ALIASES[name]
+        return f"https://www.sofascore.com/team/football/{slug}/{_TEAM_IDS[slug]}"
+
+    # 4. Fuzzy match (threshold 0.75)
+    best_score, best_slug = 0.0, None
+    for friendly, slug in _NAME_TO_SLUG.items():
+        score = SequenceMatcher(None, name, friendly).ratio()
+        if score > best_score:
+            best_score = score
+            best_slug = slug
+    if best_score >= 0.75 and best_slug:
+        return f"https://www.sofascore.com/team/football/{best_slug}/{_TEAM_IDS[best_slug]}"
+
+    return None
+
 app = FastAPI(title="Sofascore Scraper Service")
 
 _API_KEY = os.getenv("SCRAPER_API_KEY", "")
@@ -125,13 +253,11 @@ def _do_crawl(
     """Run the full crawl pipeline inside Playwright.
 
     Strategy (April 2026):
-    - Sofascore internal API now returns 403 for page.evaluate(fetch) from
-      datacenter IPs.  However the SSR-rendered team page already contains
-      match links in the DOM, and navigating to each match page + clicking
-      the Lineups tab causes the *page's own React code* to fetch lineups
-      (which passes anti-bot checks).
-    - We intercept those lineup API responses via page.on("response").
-    - Fallback: if interception doesn't fire, try page.evaluate(fetch).
+    1. Resolve team URL via known mapping → Google → Sofascore search.
+    2. Try fast API path (page.evaluate(fetch)) — works when anti-bot allows.
+    3. Fallback: navigate to each match page, click Lineups tab, intercept
+       the lineup API response from the page's own React code.
+    4. If first attempt returns 0 results, retry once with fresh browser.
     """
     from playwright.sync_api import sync_playwright
     from sofascore_formations_crawler import (
@@ -145,6 +271,44 @@ def _do_crawl(
         line = f"[{_time.time()-t0:.1f}s] {msg}"
         log.append(line)
         print(f"[crawl] {line}", flush=True)
+
+    # Resolve team URL upfront (before browser, uses mapping)
+    if not team_url:
+        mapped = _lookup_team_url(team_name)
+        if mapped:
+            team_url = mapped
+            _log(f"team URL (mapped): {team_url}")
+
+    max_attempts = 2
+    for attempt in range(1, max_attempts + 1):
+        if attempt > 1:
+            _log(f"RETRY attempt {attempt}/{max_attempts} with fresh browser")
+            import random
+            _time.sleep(random.uniform(2, 5))
+
+        entries = _do_crawl_attempt(
+            team_name, limit, team_url, attempt, _log,
+        )
+        if entries:
+            _log(f"DONE count={len(entries)}")
+            return entries, log
+
+    _log(f"DONE count=0 after {max_attempts} attempts")
+    return [], log
+
+
+def _do_crawl_attempt(
+    team_name: str,
+    limit: int,
+    team_url: str | None,
+    attempt: int,
+    _log,
+) -> list[FormationEntry]:
+    """Single crawl attempt with its own browser instance."""
+    from playwright.sync_api import sync_playwright
+    from sofascore_formations_crawler import (
+        build_context, _new_stealth_page, resolve_team_url, dismiss_overlays,
+    )
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=BROWSER_ARGS)
@@ -172,7 +336,7 @@ def _do_crawl(
             _log(f"found {len(match_links)} match links in DOM")
 
             if not match_links:
-                return [], log
+                return []
 
             # Try API approach first (works locally, may fail on Railway)
             team_id_match = re.search(r"/(\d+)$", page.url.rstrip("/"))
@@ -185,19 +349,17 @@ def _do_crawl(
                     entries = _try_api_lineups(page, api_events, team_name, limit, _log)
                     if entries:
                         _log(f"API approach SUCCESS: {len(entries)} formations")
-                        return entries, log
+                        return entries
                     _log("API lineups failed, falling back to DOM scraping")
                 else:
                     _log("API events failed, falling back to DOM scraping")
 
             # Fallback: navigate to each match page and scrape lineups from DOM
             entries = _scrape_match_lineups(page, match_links, team_name, limit, _log)
-            _log(f"DONE count={len(entries)}")
-
-            return entries, log
+            return entries
         except Exception as exc:
             _log(f"EXCEPTION: {exc}")
-            return [], log
+            return []
         finally:
             page.close()
             context.close()
@@ -205,7 +367,8 @@ def _do_crawl(
 
 
 def _extract_match_links(page, team_name: str, limit: int, _log) -> list[dict]:
-    """Extract match links and basic info from the team page DOM."""
+    """Extract match links and basic info from the team page DOM + __NEXT_DATA__."""
+    # 1. Try DOM-based extraction
     data = page.evaluate("""([limit, teamSlug]) => {
         const links = document.querySelectorAll('a[href*="/football/match/"]');
         const seen = new Set();
@@ -228,7 +391,37 @@ def _extract_match_links(page, team_name: str, limit: int, _log) -> list[dict]:
         }
         return results;
     }""", [limit, _team_slug(page.url)])
-    return data or []
+    dom_links = data or []
+
+    if len(dom_links) >= limit:
+        return dom_links
+
+    # 2. Supplement with __NEXT_DATA__ events (team page may have them in SSR)
+    nd_events = page.evaluate("""() => {
+        try {
+            const nd = window.__NEXT_DATA__;
+            if (!nd) return [];
+            const ip = nd.props?.pageProps?.initialProps;
+            if (!ip) return [];
+            // Check for events in various possible locations
+            const events = ip.lastEvents || ip.events || ip.recentEvents || [];
+            return events.filter(e => e.status?.type === 'finished').map(e => ({
+                href: '/football/match/' + (e.slug || '') + '/' + (e.customId || '') + '#id:' + e.id,
+                event_id: e.id,
+                text: (e.homeTeam?.name || '') + ' vs ' + (e.awayTeam?.name || ''),
+            })).slice(0, 30);
+        } catch(e) { return []; }
+    }""")
+
+    if nd_events:
+        seen_ids = {ml["event_id"] for ml in dom_links}
+        for ev in nd_events:
+            if ev["event_id"] not in seen_ids:
+                dom_links.append(ev)
+                seen_ids.add(ev["event_id"])
+        _log(f"__NEXT_DATA__ added {len(nd_events)} extra events")
+
+    return dom_links
 
 
 def _team_slug(url: str) -> str:
@@ -346,14 +539,30 @@ def _scrape_match_lineups(
 
             page.wait_for_timeout(2000)
 
-            # Click Lineups tab
+            # Click Lineups tab — try multiple selectors
+            lineups_clicked = False
             try:
-                tab = page.locator("text=Lineups").first
-                if tab.is_visible(timeout=3000):
-                    tab.click()
-                    page.wait_for_timeout(3000)
+                for selector in [
+                    "text=Lineups",
+                    "text=Alineaciones",
+                    "[data-tabid='lineups']",
+                    "button:has-text('Lineups')",
+                ]:
+                    try:
+                        tab = page.locator(selector).first
+                        if tab.is_visible(timeout=2000):
+                            tab.click()
+                            lineups_clicked = True
+                            break
+                    except Exception:
+                        continue
             except Exception:
                 pass
+
+            if lineups_clicked:
+                page.wait_for_timeout(5000)  # longer wait for lineup data to load
+            else:
+                page.wait_for_timeout(2000)
 
             # Remove listener
             page.remove_listener("response", on_response)
@@ -444,20 +653,41 @@ def _scrape_lineup_from_dom(page, _log) -> dict | None:
             const text = document.body.innerText;
             const formationPattern = /\\b(\\d-\\d+-\\d+(?:-\\d+)?)\\b/g;
             const formations = [...new Set(text.match(formationPattern) || [])];
-            if (formations.length < 2) return null;
+            if (formations.length < 1) return null;
 
-            // Try to get player names from lineup elements
-            const lineupEls = document.querySelectorAll('[data-testid*="lineup"], [class*="lineupPlayer"]');
-            
-            // Build a basic lineup structure
+            // Try to extract player names from various possible selectors
+            const playerSelectors = [
+                '[data-testid*="lineup"] [data-testid*="player"]',
+                '[class*="lineupPlayer"]',
+                '[class*="lineup"] [class*="name"]',
+                '[class*="Lineup"] span',
+                '[class*="formation"] [class*="player"]',
+            ];
+            let homePlayers = [];
+            let awayPlayers = [];
+            for (const sel of playerSelectors) {
+                const els = document.querySelectorAll(sel);
+                if (els.length > 0) {
+                    const names = [...els].map(el => el.textContent.trim()).filter(Boolean);
+                    // Split roughly in half for home/away
+                    const mid = Math.floor(names.length / 2);
+                    homePlayers = names.slice(0, mid);
+                    awayPlayers = names.slice(mid);
+                    break;
+                }
+            }
+
             return {
-                home: {formation: formations[0], players: []},
-                away: {formation: formations[1], players: []},
+                home: {formation: formations[0], players: homePlayers.map(n => ({player: {name: n}}))},
+                away: {formation: formations.length > 1 ? formations[1] : formations[0], players: awayPlayers.map(n => ({player: {name: n}}))},
                 _source: 'dom_scrape'
             };
         }""")
+        if data:
+            _log(f"DOM scrape found formations: {data.get('home',{}).get('formation')} / {data.get('away',{}).get('formation')}")
         return data
-    except Exception:
+    except Exception as exc:
+        _log(f"DOM scrape exception: {str(exc)[:80]}")
         return None
 
 

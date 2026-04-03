@@ -514,14 +514,23 @@ def process_match(
 
 
 def build_context(browser: Browser, headless_locale: str = "en-US") -> BrowserContext:
+    import random
+    # Rotate user agents to reduce fingerprinting
+    _UA_POOL = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+    ]
     return browser.new_context(
         locale=headless_locale,
-        viewport={"width": 1600, "height": 2200},
-        user_agent=(
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-        ),
-        color_scheme="dark",
+        viewport={"width": 1920, "height": 1080},
+        user_agent=random.choice(_UA_POOL),
+        color_scheme="light",
+        timezone_id="Europe/Madrid",
+        extra_http_headers={
+            "Accept-Language": "en-US,en;q=0.9,es;q=0.8",
+        },
     )
 
 
