@@ -170,7 +170,16 @@ def crawl(req: CrawlRequest, authorization: str | None = Header(default=None)):
 
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-gpu",
+                    "--disable-dev-shm-usage",
+                    "--disable-software-rasterizer",
+                    "--single-process",
+                ],
+            )
             context = build_context(browser)
             page = _new_stealth_page(context)
             page.set_default_timeout(15000)
