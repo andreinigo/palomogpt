@@ -73,9 +73,10 @@ def health():
 
 
 @app.get("/debug")
-def debug():
-    """Hit Sofascore and return what the browser sees (title + snippet)."""
+def debug(team: str = "Real Madrid"):
+    """Hit Sofascore, search for a team, and return what happens."""
     from playwright.sync_api import sync_playwright
+    log: list[str] = []
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
@@ -89,15 +90,51 @@ def debug():
                 stealth_sync(page)
             except ImportError:
                 pass
+            log.append("goto sofascore...")
             page.goto("https://www.sofascore.com", wait_until="domcontentloaded", timeout=20000)
-            page.wait_for_timeout(3000)
-            title = page.title()
-            body = page.locator("body").inner_text(timeout=5000)[:500]
+            page.wait_for_timeout(2000)
+            log.append(f"title: {page.title()}")
+
+            # Try to find and use search
+            search_input = None
+            for sel in ["input[placeholder*='Search']", "input[aria-label*='Search']", "input[type='text']", "input"]:
+                loc = page.locator(sel)
+                try:
+                    if loc.count() and loc.first.is_visible():
+                        search_input = loc.first
+                        log.append(f"found search input via: {sel}")
+                        break
+                except Exception:
+                    continue
+
+            if not search_input:
+                log.append("NO search input found")
+                ctx.close()
+                browser.close()
+                return {"log": log}
+
+            search_input.click()
+            search_input.fill(team)
+            page.wait_for_timeout(2000)
+            log.append(f"typed '{team}' in search")
+
+            links = page.locator("a[href*='/football/team/']")
+            count = links.count()
+            log.append(f"team links found: {count}")
+            for i in range(min(count, 5)):
+                try:
+                    href = links.nth(i).get_attribute("href") or ""
+                    text = links.nth(i).inner_text()[:60]
+                    log.append(f"  [{i}] {text} -> {href}")
+                except Exception:
+                    pass
+
             ctx.close()
             browser.close()
-        return {"title": title, "body_snippet": body}
+        return {"log": log}
     except Exception as exc:
-        return {"error": str(exc)}
+        log.append(f"ERROR: {exc}")
+        return {"log": log}
 
 
 @app.post("/crawl", response_model=CrawlResponse)
