@@ -36,7 +36,7 @@ BROWSER_ARGS = [
 ]
 
 # Hard timeout for the entire crawl operation (seconds).
-CRAWL_TIMEOUT = 90
+CRAWL_TIMEOUT = 150
 
 
 # ── request / response models ────────────────────────────────────────────
@@ -122,7 +122,17 @@ def _do_crawl(
     limit: int,
     team_url: str | None,
 ) -> tuple[list[FormationEntry], list[str]]:
-    """Run the full crawl pipeline inside Playwright."""
+    """Run the full crawl pipeline inside Playwright.
+
+    Strategy (April 2026):
+    - Sofascore internal API now returns 403 for page.evaluate(fetch) from
+      datacenter IPs.  However the SSR-rendered team page already contains
+      match links in the DOM, and navigating to each match page + clicking
+      the Lineups tab causes the *page's own React code* to fetch lineups
+      (which passes anti-bot checks).
+    - We intercept those lineup API responses via page.on("response").
+    - Fallback: if interception doesn't fire, try page.evaluate(fetch).
+    """
     from playwright.sync_api import sync_playwright
     from sofascore_formations_crawler import (
         build_context, _new_stealth_page, resolve_team_url, dismiss_overlays,
@@ -140,8 +150,8 @@ def _do_crawl(
         browser = p.chromium.launch(headless=True, args=BROWSER_ARGS)
         context = build_context(browser)
         page = _new_stealth_page(context)
-        page.set_default_timeout(10000)
-        page.set_default_navigation_timeout(15000)
+        page.set_default_timeout(12000)
+        page.set_default_navigation_timeout(20000)
 
         try:
             # Resolve team URL
@@ -151,27 +161,37 @@ def _do_crawl(
                 team_page_url = resolve_team_url(page, team_query=team_name)
             _log(f"team URL: {team_page_url}")
 
-            # Extract team_id from URL
-            team_id_match = re.search(r"/(\d+)$", team_page_url.rstrip("/"))
-            if not team_id_match:
-                raise RuntimeError(f"Cannot extract team_id from URL: {team_page_url}")
-            team_id = team_id_match.group(1)
-
-            # Navigate to team page (establishes session cookies/tokens for API)
+            # Navigate to team page
             page.goto(team_page_url, wait_until="domcontentloaded")
             dismiss_overlays(page)
-            page.wait_for_timeout(2000)
-            _log("team page loaded")
+            page.wait_for_timeout(3000)
+            _log(f"team page loaded: {page.url}")
 
-            # Check what the page title/URL is after navigation
-            _log(f"page.url={page.url}  title={page.title()[:80]}")
+            # Extract match links from DOM (SSR-rendered)
+            match_links = _extract_match_links(page, limit, _log)
+            _log(f"found {len(match_links)} match links in DOM")
 
-            # Fetch events via internal API
-            events = _fetch_events(page, team_id, limit, t0, log)
-            _log(f"found {len(events)} finished events")
+            if not match_links:
+                return [], log
 
-            # Fetch lineups for each event
-            entries = _fetch_lineups(page, events, team_name, limit, t0, log)
+            # Try API approach first (works locally, may fail on Railway)
+            team_id_match = re.search(r"/(\d+)$", page.url.rstrip("/"))
+            team_id = team_id_match.group(1) if team_id_match else None
+
+            if team_id:
+                api_events = _try_api_events(page, team_id, limit, _log)
+                if api_events:
+                    _log(f"API approach: {len(api_events)} events")
+                    entries = _try_api_lineups(page, api_events, team_name, limit, _log)
+                    if entries:
+                        _log(f"API approach SUCCESS: {len(entries)} formations")
+                        return entries, log
+                    _log("API lineups failed, falling back to DOM scraping")
+                else:
+                    _log("API events failed, falling back to DOM scraping")
+
+            # Fallback: navigate to each match page and scrape lineups from DOM
+            entries = _scrape_match_lineups(page, match_links, team_name, limit, _log)
             _log(f"DONE count={len(entries)}")
 
             return entries, log
@@ -184,124 +204,237 @@ def _do_crawl(
             browser.close()
 
 
-def _fetch_events(page, team_id: str, limit: int, t0: float, log: list[str]) -> list[dict]:
-    """Fetch recent finished events via Sofascore API from browser context."""
-    all_events: list[dict] = []
-
-    def _log(msg: str):
-        line = f"[{_time.time()-t0:.1f}s] {msg}"
-        log.append(line)
-        print(f"[api] {line}", flush=True)
-
-    for page_num in range(3):
-        try:
-            data = page.evaluate(
-                """async ([teamId, pageNum]) => {
-                    try {
-                        const resp = await fetch(`/api/v1/team/${teamId}/events/last/${pageNum}`);
-                        if (!resp.ok) return {error: resp.status};
-                        return await resp.json();
-                    } catch(e) { return {error: e.message}; }
-                }""",
-                [team_id, page_num],
-            )
-        except Exception as exc:
-            _log(f"events page {page_num} EXCEPTION: {exc}")
-            break
-
-        if not data:
-            _log(f"events page {page_num}: null response")
-            break
-        if "error" in data:
-            _log(f"events page {page_num}: error={data['error']}")
-            break
-        if "events" not in data:
-            _log(f"events page {page_num}: no 'events' key, keys={list(data.keys())}")
-            break
-
-        page_events = data["events"]
-        if not page_events:
-            _log(f"events page {page_num}: empty events list")
-            break
-
-        all_events.extend(page_events)
-        _log(f"events page {page_num}: {len(page_events)} events")
-
-        finished = [e for e in all_events if e.get("status", {}).get("type") == "finished"]
-        if len(finished) >= limit * 2:
-            break
-
-    # Return only finished events
-    finished = [e for e in all_events if e.get("status", {}).get("type") == "finished"]
-    if not finished and all_events:
-        statuses = set(e.get("status", {}).get("type", "?") for e in all_events)
-        _log(f"0 finished out of {len(all_events)} events, statuses: {statuses}")
-    return finished
+def _extract_match_links(page, limit: int, _log) -> list[dict]:
+    """Extract match links and basic info from the team page DOM."""
+    data = page.evaluate("""(limit) => {
+        const links = document.querySelectorAll('a[href*="/football/match/"]');
+        const seen = new Set();
+        const results = [];
+        for (const a of links) {
+            const href = a.getAttribute('href');
+            if (!href || seen.has(href)) continue;
+            seen.add(href);
+            // Extract event ID from href hash: #id:14083607
+            const idMatch = href.match(/#id:(\\d+)/);
+            if (!idMatch) continue;
+            results.push({
+                href: href,
+                event_id: parseInt(idMatch[1]),
+                text: a.innerText.substring(0, 100).replace(/\\n/g, ' | '),
+            });
+            if (results.length >= limit * 3) break;
+        }
+        return results;
+    }""", limit)
+    return data or []
 
 
-def _fetch_lineups(
-    page,
-    events: list[dict],
-    team_name: str,
-    limit: int,
-    t0: float,
-    log: list[str],
-) -> list[FormationEntry]:
-    """Fetch lineup data for each event via API."""
+def _try_api_events(page, team_id: str, limit: int, _log) -> list[dict]:
+    """Try the direct API approach for events (fast, works locally)."""
+    try:
+        data = page.evaluate(
+            """async (teamId) => {
+                try {
+                    const resp = await fetch('/api/v1/team/' + teamId + '/events/last/0');
+                    if (!resp.ok) return {error: resp.status};
+                    return await resp.json();
+                } catch(e) { return {error: e.message}; }
+            }""",
+            team_id,
+        )
+        if not data or "error" in data:
+            _log(f"API events: {data.get('error') if data else 'null'}")
+            return []
+        events = data.get("events", [])
+        return [e for e in events if e.get("status", {}).get("type") == "finished"]
+    except Exception as exc:
+        _log(f"API events exception: {exc}")
+        return []
+
+
+def _try_api_lineups(page, events: list[dict], team_name: str, limit: int, _log) -> list[FormationEntry]:
+    """Try fetching lineups via direct API (fast, works locally)."""
     entries: list[FormationEntry] = []
-    consecutive_failures = 0
-
-    def _log(msg: str):
-        line = f"[{_time.time()-t0:.1f}s] {msg}"
-        log.append(line)
-        print(f"[api] {line}", flush=True)
-
+    failures = 0
     for event in events:
         if len(entries) >= limit:
             break
-        if consecutive_failures >= 5:
-            _log("too many failures, stopping")
+        if failures >= 3:
             break
-
         event_id = event.get("id")
-        home = event.get("homeTeam", {}).get("name", "")
-        away = event.get("awayTeam", {}).get("name", "")
-
         try:
             lineups = page.evaluate(
                 """async (eventId) => {
                     try {
-                        const resp = await fetch(`/api/v1/event/${eventId}/lineups`);
+                        const resp = await fetch('/api/v1/event/' + eventId + '/lineups');
                         if (!resp.ok) return {error: resp.status};
                         return await resp.json();
                     } catch(e) { return {error: e.message}; }
                 }""",
                 event_id,
             )
+            if not lineups or "error" in lineups:
+                failures += 1
+                continue
+            entry = _parse_lineup(lineups, event, team_name, len(entries) + 1)
+            if entry:
+                entries.append(entry)
+                failures = 0
+            else:
+                failures += 1
+        except Exception:
+            failures += 1
+    return entries
+
+
+def _scrape_match_lineups(
+    page, match_links: list[dict], team_name: str, limit: int, _log,
+) -> list[FormationEntry]:
+    """Navigate to each match page, click Lineups tab, and scrape data from DOM."""
+    import threading
+
+    entries: list[FormationEntry] = []
+    consecutive_failures = 0
+
+    for ml in match_links:
+        if len(entries) >= limit:
+            break
+        if consecutive_failures >= 5:
+            _log("too many DOM scraping failures, stopping")
+            break
+
+        event_id = ml["event_id"]
+        match_url = f"https://www.sofascore.com{ml['href']}"
+        _log(f"navigating to match {event_id}...")
+
+        try:
+            # Set up response interception for lineups
+            lineup_data = {}
+            lock = threading.Lock()
+
+            def on_response(resp):
+                if f"/event/{event_id}/lineups" in resp.url and resp.status == 200:
+                    try:
+                        with lock:
+                            lineup_data["data"] = resp.json()
+                    except Exception:
+                        pass
+
+            page.on("response", on_response)
+
+            # Navigate to match page
+            page.goto(match_url, wait_until="domcontentloaded")
+            page.wait_for_timeout(2000)
+
+            # Click Lineups tab
+            try:
+                tab = page.locator("text=Lineups").first
+                if tab.is_visible(timeout=3000):
+                    tab.click()
+                    page.wait_for_timeout(3000)
+            except Exception:
+                pass
+
+            # Remove listener
+            page.remove_listener("response", on_response)
+
+            # Try intercepted data first
+            lineups = lineup_data.get("data")
+
+            # If interception didn't get data, try direct API fetch
+            if not lineups:
+                try:
+                    lineups = page.evaluate(
+                        """async (eventId) => {
+                            try {
+                                const resp = await fetch('/api/v1/event/' + eventId + '/lineups');
+                                if (!resp.ok) return null;
+                                return await resp.json();
+                            } catch(e) { return null; }
+                        }""",
+                        event_id,
+                    )
+                except Exception:
+                    pass
+
+            # If still no API data, try scraping formation from DOM
+            if not lineups:
+                lineups = _scrape_lineup_from_dom(page, _log)
+
+            if not lineups:
+                _log(f"no lineup data for match {event_id}")
+                consecutive_failures += 1
+                continue
+
+            # Get event info from page
+            event_info = page.evaluate("""() => {
+                const nd = window.__NEXT_DATA__;
+                if (!nd || !nd.props || !nd.props.pageProps || !nd.props.pageProps.initialProps) return null;
+                const ev = nd.props.pageProps.initialProps.event;
+                if (!ev) return null;
+                return {
+                    id: ev.id,
+                    slug: ev.slug || '',
+                    customId: ev.customId || '',
+                    startTimestamp: ev.startTimestamp,
+                    homeTeam: ev.homeTeam ? {name: ev.homeTeam.name} : {name: ''},
+                    awayTeam: ev.awayTeam ? {name: ev.awayTeam.name} : {name: ''},
+                    status: ev.status || {}
+                };
+            }""")
+
+            if not event_info:
+                # Construct minimal event info from match link
+                event_info = {
+                    "id": event_id,
+                    "slug": "",
+                    "customId": "",
+                    "startTimestamp": None,
+                    "homeTeam": {"name": ""},
+                    "awayTeam": {"name": ""},
+                    "status": {},
+                }
+
+            entry = _parse_lineup(lineups, event_info, team_name, len(entries) + 1)
+            if entry:
+                entries.append(entry)
+                consecutive_failures = 0
+                _log(f"OK {entry.formation} vs {entry.opponent} ({entry.match_date})")
+            else:
+                _log(f"no formation parsed for match {event_id}")
+                consecutive_failures += 1
+
         except Exception as exc:
-            _log(f"lineups EXCEPTION for {event_id} ({home} vs {away}): {exc}")
+            _log(f"match {event_id} exception: {exc}")
             consecutive_failures += 1
-            continue
-
-        if not lineups:
-            _log(f"lineups null for {event_id} ({home} vs {away})")
-            consecutive_failures += 1
-            continue
-        if "error" in lineups:
-            _log(f"lineups error for {event_id} ({home} vs {away}): {lineups['error']}")
-            consecutive_failures += 1
-            continue
-
-        entry = _parse_lineup(lineups, event, team_name, len(entries) + 1)
-        if entry:
-            entries.append(entry)
-            consecutive_failures = 0
-            _log(f"OK {entry.formation} vs {entry.opponent} ({entry.match_date})")
-        else:
-            _log(f"no formation parsed for {event_id} ({home} vs {away})")
-            consecutive_failures += 1
+            page.remove_listener("response", on_response) if "on_response" in dir() else None
 
     return entries
+
+
+def _scrape_lineup_from_dom(page, _log) -> dict | None:
+    """Last resort: scrape lineup data directly from rendered DOM."""
+    try:
+        data = page.evaluate("""() => {
+            // Get formations from page text
+            const text = document.body.innerText;
+            const formationPattern = /\\b(\\d-\\d+-\\d+(?:-\\d+)?)\\b/g;
+            const formations = [...new Set(text.match(formationPattern) || [])];
+            if (formations.length < 2) return null;
+
+            // Try to get player names from lineup elements
+            const lineupEls = document.querySelectorAll('[data-testid*="lineup"], [class*="lineupPlayer"]');
+            
+            // Build a basic lineup structure
+            return {
+                home: {formation: formations[0], players: []},
+                away: {formation: formations[1], players: []},
+                _source: 'dom_scrape'
+            };
+        }""")
+        return data
+    except Exception:
+        return None
 
 
 def _parse_lineup(
