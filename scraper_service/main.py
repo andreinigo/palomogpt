@@ -73,8 +73,8 @@ def health():
 
 
 @app.get("/debug")
-def debug(team: str = "Real Madrid"):
-    """Hit Sofascore, search for a team, and return what happens."""
+def debug(team: str = "Real Madrid", team_url: str = ""):
+    """Debug: test search or direct team page navigation."""
     from playwright.sync_api import sync_playwright
     log: list[str] = []
     try:
@@ -90,44 +90,59 @@ def debug(team: str = "Real Madrid"):
                 stealth_sync(page)
             except ImportError:
                 pass
-            log.append("goto sofascore...")
-            page.goto("https://www.sofascore.com", wait_until="domcontentloaded", timeout=20000)
-            page.wait_for_timeout(2000)
-            log.append(f"title: {page.title()}")
 
-            # Try to find and use search
-            search_input = None
-            for sel in ["input[placeholder*='Search']", "input[aria-label*='Search']", "input[type='text']", "input"]:
-                loc = page.locator(sel)
-                try:
-                    if loc.count() and loc.first.is_visible():
-                        search_input = loc.first
-                        log.append(f"found search input via: {sel}")
-                        break
-                except Exception:
-                    continue
+            if team_url:
+                log.append(f"goto team_url: {team_url}")
+                page.goto(team_url, wait_until="domcontentloaded", timeout=20000)
+                page.wait_for_timeout(3000)
+                log.append(f"title: {page.title()}")
+                body = page.locator("body").inner_text(timeout=5000)[:300]
+                log.append(f"body: {body}")
 
-            if not search_input:
-                log.append("NO search input found")
-                ctx.close()
-                browser.close()
-                return {"log": log}
+                match_links = page.locator("a[href*='/football/match/']")
+                count = match_links.count()
+                log.append(f"match links found: {count}")
+                for i in range(min(count, 5)):
+                    try:
+                        href = match_links.nth(i).get_attribute("href") or ""
+                        log.append(f"  [{i}] {href}")
+                    except Exception:
+                        pass
+            else:
+                log.append("goto sofascore...")
+                page.goto("https://www.sofascore.com", wait_until="domcontentloaded", timeout=20000)
+                page.wait_for_timeout(2000)
+                log.append(f"title: {page.title()}")
 
-            search_input.click()
-            search_input.fill(team)
-            page.wait_for_timeout(2000)
-            log.append(f"typed '{team}' in search")
+                search_input = None
+                for sel in ["input[placeholder*='Search']", "input[aria-label*='Search']", "input[type='text']", "input"]:
+                    loc = page.locator(sel)
+                    try:
+                        if loc.count() and loc.first.is_visible():
+                            search_input = loc.first
+                            log.append(f"found search input via: {sel}")
+                            break
+                    except Exception:
+                        continue
 
-            links = page.locator("a[href*='/football/team/']")
-            count = links.count()
-            log.append(f"team links found: {count}")
-            for i in range(min(count, 5)):
-                try:
-                    href = links.nth(i).get_attribute("href") or ""
-                    text = links.nth(i).inner_text()[:60]
-                    log.append(f"  [{i}] {text} -> {href}")
-                except Exception:
-                    pass
+                if search_input:
+                    search_input.click()
+                    search_input.fill(team)
+                    page.wait_for_timeout(3000)
+                    log.append(f"typed '{team}' in search, waited 3s")
+
+                    links = page.locator("a[href*='/football/team/']")
+                    count = links.count()
+                    log.append(f"team links found: {count}")
+                    for i in range(min(count, 5)):
+                        try:
+                            href = links.nth(i).get_attribute("href") or ""
+                            text = links.nth(i).inner_text()[:60]
+                            log.append(f"  [{i}] {text} -> {href}")
+                        except Exception:
+                            pass
+                else:
+                    log.append("NO search input found")
 
             ctx.close()
             browser.close()
