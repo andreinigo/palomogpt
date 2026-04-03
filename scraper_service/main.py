@@ -151,7 +151,7 @@ def debug(team_url: str = "https://www.sofascore.com/team/football/real-madrid/2
 def crawl(req: CrawlRequest, authorization: str | None = Header(default=None)):
     """Crawl Sofascore for recent formations using a hybrid approach:
     1. Load team page in browser to get session cookies
-    2. Use Sofascore internal API (via page.evaluate fetch) for match list + lineups
+    2. Extract cookies and use Python httpx to call Sofascore API (proper timeouts)
     3. Fall back to full page scraping only if API fails
     """
     import time as _time
@@ -165,7 +165,6 @@ def crawl(req: CrawlRequest, authorization: str | None = Header(default=None)):
         build_context, _new_stealth_page, resolve_team_url,
         dismiss_overlays, click_tab_if_present,
     )
-    from urllib.parse import urljoin
     import re
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="scraper_"))
@@ -191,39 +190,65 @@ def crawl(req: CrawlRequest, authorization: str | None = Header(default=None)):
             team_page_url = req.team_url or resolve_team_url(page, req.team_name)
             print(f"[crawl] [{_time.time()-t0:.1f}s] team URL: {team_page_url}", flush=True)
 
-            # Extract team_id from URL (e.g. /team/football/real-madrid/2829 → 2829)
             team_id_match = re.search(r"/(\d+)$", team_page_url.rstrip("/"))
             team_id = team_id_match.group(1) if team_id_match else None
 
-            # Navigate to team page to establish session
+            # Navigate to team page to establish session + get cookies
             page.goto(team_page_url, wait_until="domcontentloaded")
             dismiss_overlays(page)
             page.wait_for_timeout(2000)
 
-            # Try API approach first (much faster, no extra pages needed)
-            entries: list[FormationEntry] = []
-            api_success = False
+            # Extract cookies from browser context for Python-side API calls
+            cookies = context.cookies("https://www.sofascore.com")
+            cookie_header = "; ".join(f"{c['name']}={c['value']}" for c in cookies)
+            user_agent = page.evaluate("() => navigator.userAgent")
+            print(f"[crawl] [{_time.time()-t0:.1f}s] extracted {len(cookies)} cookies", flush=True)
 
-            if team_id:
-                print(f"[crawl] [{_time.time()-t0:.1f}s] trying API approach with team_id={team_id}", flush=True)
-                try:
-                    entries = _crawl_via_api(page, team_id, req.team_name, req.limit, t0, MAX_SECONDS)
-                    api_success = len(entries) > 0
-                    print(f"[crawl] [{_time.time()-t0:.1f}s] API returned {len(entries)} formations", flush=True)
-                except Exception as exc:
-                    print(f"[crawl] [{_time.time()-t0:.1f}s] API approach failed: {exc}", flush=True)
+            # Close browser early — we don't need it for API calls
+            page.close()
+            context.close()
+            browser.close()
 
-            # Fall back to page scraping if API didn't work
-            if not api_success:
-                print(f"[crawl] [{_time.time()-t0:.1f}s] falling back to page scraping", flush=True)
+        # Now use Python httpx for API calls (proper timeouts, no browser needed)
+        entries: list[FormationEntry] = []
+        api_success = False
+
+        if team_id and cookie_header:
+            print(f"[crawl] [{_time.time()-t0:.1f}s] trying API approach with team_id={team_id}", flush=True)
+            try:
+                entries = _crawl_via_api(
+                    team_id, req.team_name, req.limit,
+                    cookie_header, user_agent,
+                    t0, MAX_SECONDS,
+                )
+                api_success = len(entries) > 0
+                print(f"[crawl] [{_time.time()-t0:.1f}s] API returned {len(entries)} formations", flush=True)
+            except Exception as exc:
+                print(f"[crawl] [{_time.time()-t0:.1f}s] API approach failed: {exc}", flush=True)
+
+        # Fall back to page scraping if API didn't work
+        if not api_success:
+            print(f"[crawl] [{_time.time()-t0:.1f}s] falling back to page scraping", flush=True)
+            with sync_playwright() as p:
+                browser = p.chromium.launch(
+                    headless=True,
+                    args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage", "--disable-software-rasterizer"],
+                )
+                context = build_context(browser)
+                page = _new_stealth_page(context)
+                page.set_default_timeout(12000)
+                page.set_default_navigation_timeout(20000)
+                page.goto(team_page_url, wait_until="domcontentloaded")
+                dismiss_overlays(page)
+                page.wait_for_timeout(1500)
+
                 entries = _crawl_via_pages(
                     page, context, req.team_name, req.limit,
                     tmp_dir, t0, MAX_SECONDS,
                 )
-
-            page.close()
-            context.close()
-            browser.close()
+                page.close()
+                context.close()
+                browser.close()
 
         print(f"[crawl] [{_time.time()-t0:.1f}s] DONE count={len(entries)}", flush=True)
         return CrawlResponse(
@@ -239,49 +264,52 @@ def crawl(req: CrawlRequest, authorization: str | None = Header(default=None)):
 
 
 def _crawl_via_api(
-    page: "Page",
     team_id: str,
     team_name: str,
     limit: int,
+    cookie_header: str,
+    user_agent: str,
     t0: float,
     max_seconds: float,
 ) -> list[FormationEntry]:
-    """Use Sofascore's internal API from within the browser context (has session cookies)."""
+    """Use Sofascore API with cookies extracted from browser session."""
     import time as _time
+    import httpx
     from difflib import SequenceMatcher
 
-    # Fetch last events via API (paginate if needed)
+    headers = {
+        "Cookie": cookie_header,
+        "User-Agent": user_agent,
+        "Referer": "https://www.sofascore.com/",
+        "Accept": "application/json",
+    }
+
+    # Fetch events (paginate if needed)
     all_events: list[dict] = []
-    for page_num in range(3):  # up to 3 pages
+    for page_num in range(3):
         if _time.time() - t0 > max_seconds:
             break
         try:
-            events_data = page.evaluate(f"""
-                async () => {{
-                    const ctrl = new AbortController();
-                    const tid = setTimeout(() => ctrl.abort(), 10000);
-                    try {{
-                        const resp = await fetch('/api/v1/team/{team_id}/events/last/{page_num}', {{signal: ctrl.signal}});
-                        clearTimeout(tid);
-                        if (!resp.ok) return null;
-                        return await resp.json();
-                    }} catch(e) {{ clearTimeout(tid); return null; }}
-                }}
-            """)
+            resp = httpx.get(
+                f"https://www.sofascore.com/api/v1/team/{team_id}/events/last/{page_num}",
+                headers=headers,
+                timeout=15.0,
+            )
+            if resp.status_code != 200:
+                print(f"[api] [{_time.time()-t0:.1f}s] events page {page_num}: HTTP {resp.status_code}", flush=True)
+                break
+            data = resp.json()
         except Exception as exc:
-            print(f"[api] [{_time.time()-t0:.1f}s] events page {page_num} evaluate failed: {exc}", flush=True)
+            print(f"[api] [{_time.time()-t0:.1f}s] events page {page_num} failed: {exc}", flush=True)
             break
 
-        if not events_data or "events" not in events_data:
-            break
-        page_events = events_data["events"]
+        page_events = data.get("events", [])
         if not page_events:
             break
         all_events.extend(page_events)
         print(f"[api] [{_time.time()-t0:.1f}s] events page {page_num}: {len(page_events)} events (total: {len(all_events)})", flush=True)
-        # If we already have enough finished events, stop paginating
         finished_count = sum(1 for e in all_events if e.get("status", {}).get("type") == "finished")
-        if finished_count >= limit * 2:  # 2x buffer for events without lineups
+        if finished_count >= limit * 2:
             break
 
     if not all_events:
@@ -304,26 +332,22 @@ def _crawl_via_api(
         away = event.get("awayTeam", {}).get("name", "")
         status_type = event.get("status", {}).get("type", "")
 
-        # Skip non-finished events
         if status_type != "finished":
             continue
 
-        # Get lineups via API with timeout
+        # Get lineups via API with httpx timeout
         try:
-            lineups_data = page.evaluate(f"""
-                async () => {{
-                    const ctrl = new AbortController();
-                    const tid = setTimeout(() => ctrl.abort(), 10000);
-                    try {{
-                        const resp = await fetch('/api/v1/event/{event_id}/lineups', {{signal: ctrl.signal}});
-                        clearTimeout(tid);
-                        if (!resp.ok) return null;
-                        return await resp.json();
-                    }} catch(e) {{ clearTimeout(tid); return null; }}
-                }}
-            """)
+            resp = httpx.get(
+                f"https://www.sofascore.com/api/v1/event/{event_id}/lineups",
+                headers=headers,
+                timeout=10.0,
+            )
+            if resp.status_code != 200:
+                consecutive_failures += 1
+                continue
+            lineups_data = resp.json()
         except Exception as exc:
-            print(f"[api] [{_time.time()-t0:.1f}s] lineups evaluate failed for event {event_id}: {exc}", flush=True)
+            print(f"[api] [{_time.time()-t0:.1f}s] lineups failed for event {event_id}: {exc}", flush=True)
             consecutive_failures += 1
             continue
 
