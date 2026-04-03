@@ -68,6 +68,7 @@ class CrawlResponse(BaseModel):
     team_name: str
     count: int
     formations: list[FormationEntry]
+    debug_log: list[str] = Field(default_factory=list, description="Diagnostic log entries")
 
 
 # ── helpers ───────────────────────────────────────────────────────────────
@@ -97,7 +98,7 @@ def crawl(req: CrawlRequest, authorization: str | None = Header(default=None)):
     # the uvicorn worker indefinitely.
     future = _EXECUTOR.submit(_do_crawl, req.team_name, req.limit, req.team_url)
     try:
-        entries = future.result(timeout=CRAWL_TIMEOUT)
+        entries, debug_log = future.result(timeout=CRAWL_TIMEOUT)
     except FuturesTimeout:
         future.cancel()
         print(f"[crawl] HARD TIMEOUT after {CRAWL_TIMEOUT}s", flush=True)
@@ -112,6 +113,7 @@ def crawl(req: CrawlRequest, authorization: str | None = Header(default=None)):
         team_name=req.team_name,
         count=len(entries),
         formations=entries,
+        debug_log=debug_log,
     )
 
 
@@ -119,7 +121,7 @@ def _do_crawl(
     team_name: str,
     limit: int,
     team_url: str | None,
-) -> list[FormationEntry]:
+) -> tuple[list[FormationEntry], list[str]]:
     """Run the full crawl pipeline inside Playwright."""
     from playwright.sync_api import sync_playwright
     from sofascore_formations_crawler import (
@@ -127,6 +129,12 @@ def _do_crawl(
     )
 
     t0 = _time.time()
+    log: list[str] = []
+
+    def _log(msg: str):
+        line = f"[{_time.time()-t0:.1f}s] {msg}"
+        log.append(line)
+        print(f"[crawl] {line}", flush=True)
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=BROWSER_ARGS)
@@ -141,7 +149,7 @@ def _do_crawl(
                 team_page_url = team_url
             else:
                 team_page_url = resolve_team_url(page, team_query=team_name)
-            print(f"[crawl] [{_time.time()-t0:.1f}s] team URL: {team_page_url}", flush=True)
+            _log(f"team URL: {team_page_url}")
 
             # Extract team_id from URL
             team_id_match = re.search(r"/(\d+)$", team_page_url.rstrip("/"))
@@ -153,26 +161,37 @@ def _do_crawl(
             page.goto(team_page_url, wait_until="domcontentloaded")
             dismiss_overlays(page)
             page.wait_for_timeout(2000)
-            print(f"[crawl] [{_time.time()-t0:.1f}s] team page loaded", flush=True)
+            _log("team page loaded")
+
+            # Check what the page title/URL is after navigation
+            _log(f"page.url={page.url}  title={page.title()[:80]}")
 
             # Fetch events via internal API
-            events = _fetch_events(page, team_id, limit, t0)
-            print(f"[crawl] [{_time.time()-t0:.1f}s] found {len(events)} finished events", flush=True)
+            events = _fetch_events(page, team_id, limit, t0, log)
+            _log(f"found {len(events)} finished events")
 
             # Fetch lineups for each event
-            entries = _fetch_lineups(page, events, team_name, limit, t0)
-            print(f"[crawl] [{_time.time()-t0:.1f}s] DONE count={len(entries)}", flush=True)
+            entries = _fetch_lineups(page, events, team_name, limit, t0, log)
+            _log(f"DONE count={len(entries)}")
 
-            return entries
+            return entries, log
+        except Exception as exc:
+            _log(f"EXCEPTION: {exc}")
+            return [], log
         finally:
             page.close()
             context.close()
             browser.close()
 
 
-def _fetch_events(page, team_id: str, limit: int, t0: float) -> list[dict]:
+def _fetch_events(page, team_id: str, limit: int, t0: float, log: list[str]) -> list[dict]:
     """Fetch recent finished events via Sofascore API from browser context."""
     all_events: list[dict] = []
+
+    def _log(msg: str):
+        line = f"[{_time.time()-t0:.1f}s] {msg}"
+        log.append(line)
+        print(f"[api] {line}", flush=True)
 
     for page_num in range(3):
         try:
@@ -187,31 +206,37 @@ def _fetch_events(page, team_id: str, limit: int, t0: float) -> list[dict]:
                 [team_id, page_num],
             )
         except Exception as exc:
-            print(f"[api] [{_time.time()-t0:.1f}s] events page {page_num} failed: {exc}", flush=True)
+            _log(f"events page {page_num} EXCEPTION: {exc}")
             break
 
         if not data:
-            print(f"[api] [{_time.time()-t0:.1f}s] events page {page_num}: null response", flush=True)
+            _log(f"events page {page_num}: null response")
             break
         if "error" in data:
-            print(f"[api] [{_time.time()-t0:.1f}s] events page {page_num}: error={data['error']}", flush=True)
+            _log(f"events page {page_num}: error={data['error']}")
             break
         if "events" not in data:
+            _log(f"events page {page_num}: no 'events' key, keys={list(data.keys())}")
             break
 
         page_events = data["events"]
         if not page_events:
+            _log(f"events page {page_num}: empty events list")
             break
 
         all_events.extend(page_events)
-        print(f"[api] [{_time.time()-t0:.1f}s] events page {page_num}: {len(page_events)} events", flush=True)
+        _log(f"events page {page_num}: {len(page_events)} events")
 
         finished = [e for e in all_events if e.get("status", {}).get("type") == "finished"]
         if len(finished) >= limit * 2:
             break
 
     # Return only finished events
-    return [e for e in all_events if e.get("status", {}).get("type") == "finished"]
+    finished = [e for e in all_events if e.get("status", {}).get("type") == "finished"]
+    if not finished and all_events:
+        statuses = set(e.get("status", {}).get("type", "?") for e in all_events)
+        _log(f"0 finished out of {len(all_events)} events, statuses: {statuses}")
+    return finished
 
 
 def _fetch_lineups(
@@ -220,16 +245,22 @@ def _fetch_lineups(
     team_name: str,
     limit: int,
     t0: float,
+    log: list[str],
 ) -> list[FormationEntry]:
     """Fetch lineup data for each event via API."""
     entries: list[FormationEntry] = []
     consecutive_failures = 0
 
+    def _log(msg: str):
+        line = f"[{_time.time()-t0:.1f}s] {msg}"
+        log.append(line)
+        print(f"[api] {line}", flush=True)
+
     for event in events:
         if len(entries) >= limit:
             break
         if consecutive_failures >= 5:
-            print(f"[api] [{_time.time()-t0:.1f}s] too many failures, stopping", flush=True)
+            _log("too many failures, stopping")
             break
 
         event_id = event.get("id")
@@ -248,16 +279,16 @@ def _fetch_lineups(
                 event_id,
             )
         except Exception as exc:
-            print(f"[api] [{_time.time()-t0:.1f}s] lineups failed for {event_id}: {exc}", flush=True)
+            _log(f"lineups EXCEPTION for {event_id} ({home} vs {away}): {exc}")
             consecutive_failures += 1
             continue
 
         if not lineups:
-            print(f"[api] [{_time.time()-t0:.1f}s] lineups null for {event_id}", flush=True)
+            _log(f"lineups null for {event_id} ({home} vs {away})")
             consecutive_failures += 1
             continue
         if "error" in lineups:
-            print(f"[api] [{_time.time()-t0:.1f}s] lineups error for {event_id}: {lineups['error']}", flush=True)
+            _log(f"lineups error for {event_id} ({home} vs {away}): {lineups['error']}")
             consecutive_failures += 1
             continue
 
@@ -265,8 +296,9 @@ def _fetch_lineups(
         if entry:
             entries.append(entry)
             consecutive_failures = 0
-            print(f"[api] [{_time.time()-t0:.1f}s] ✓ {entry.formation} vs {entry.opponent} ({entry.match_date})", flush=True)
+            _log(f"OK {entry.formation} vs {entry.opponent} ({entry.match_date})")
         else:
+            _log(f"no formation parsed for {event_id} ({home} vs {away})")
             consecutive_failures += 1
 
     return entries
