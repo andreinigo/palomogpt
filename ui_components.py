@@ -165,14 +165,170 @@ def _render_roster_players(roster: list, expand_key: str = "roster") -> None:
 
 
 # ---------------------------------------------------------------------------
-# Formation images display
+# Formation pitch diagram (SVG)
+# ---------------------------------------------------------------------------
+
+def _formation_svg(lineup_grid: list[dict], formation: str = "") -> str:
+    """Return an SVG half-pitch with players placed by API-Football grid data.
+
+    Grid format from API: ``"row:col"`` where row 1 = GK (bottom),
+    higher rows = further up the pitch.  Column numbers indicate lateral
+    position within each row.
+    """
+    from xml.sax.saxutils import escape as _esc
+
+    if not lineup_grid:
+        return ""
+
+    W, H = 260, 360
+    PX, PY, PW, PH = 15, 15, 230, 320
+    CX = PX + PW / 2
+    LC = "rgba(255,255,255,0.35)"
+
+    # --- parse grid positions ---
+    rows: dict[int, list[tuple[int, dict]]] = {}
+    for p in lineup_grid:
+        g = p.get("grid") or ""
+        if ":" not in g:
+            continue
+        r, c = int(g.split(":")[0]), int(g.split(":")[1])
+        rows.setdefault(r, []).append((c, p))
+
+    if not rows:
+        return ""
+
+    max_row = max(rows)
+    parts: list[str] = []
+
+    # --- SVG root ---
+    parts.append(
+        f'<svg viewBox="0 0 {W} {H}" xmlns="http://www.w3.org/2000/svg"'
+        f' style="width:100%;max-width:{W}px;display:block;margin:0 auto;'
+        f'font-family:-apple-system,system-ui,BlinkMacSystemFont,sans-serif">'
+    )
+
+    # Background
+    parts.append(f'<rect width="{W}" height="{H}" rx="10" fill="#1a472a"/>')
+
+    # Grass stripes
+    sw = PW / 6
+    for i in range(0, 6, 2):
+        parts.append(
+            f'<rect x="{PX + i * sw:.0f}" y="{PY}" '
+            f'width="{sw:.0f}" height="{PH}" fill="rgba(255,255,255,0.025)"/>'
+        )
+
+    # Pitch outline
+    parts.append(
+        f'<rect x="{PX}" y="{PY}" width="{PW}" height="{PH}" '
+        f'fill="none" stroke="{LC}" stroke-width="1.5" rx="1"/>'
+    )
+
+    # Centre line (top edge = halfway line)
+    parts.append(
+        f'<line x1="{PX}" y1="{PY}" x2="{PX + PW}" y2="{PY}" '
+        f'stroke="{LC}" stroke-width="1.5"/>'
+    )
+
+    # Centre circle arc
+    rc = 42
+    parts.append(
+        f'<path d="M{CX - rc} {PY} A{rc} {rc} 0 0 1 {CX + rc} {PY}" '
+        f'fill="none" stroke="{LC}" stroke-width="1.5"/>'
+    )
+    parts.append(f'<circle cx="{CX}" cy="{PY}" r="3" fill="{LC}"/>')
+
+    # Penalty area
+    paw, pah = 152, 72
+    pax, pay = CX - paw / 2, PY + PH - pah
+    parts.append(
+        f'<rect x="{pax:.0f}" y="{pay:.0f}" width="{paw}" height="{pah}" '
+        f'fill="none" stroke="{LC}" stroke-width="1.5"/>'
+    )
+
+    # Goal area
+    gaw, gah = 66, 26
+    gax, gay = CX - gaw / 2, PY + PH - gah
+    parts.append(
+        f'<rect x="{gax:.0f}" y="{gay:.0f}" width="{gaw}" height="{gah}" '
+        f'fill="none" stroke="{LC}" stroke-width="1.5"/>'
+    )
+
+    # Penalty spot
+    parts.append(f'<circle cx="{CX}" cy="{pay + 18:.0f}" r="2" fill="{LC}"/>')
+
+    # Penalty arc
+    ar = 28
+    parts.append(
+        f'<path d="M{CX - ar} {pay:.0f} A{ar} {ar} 0 0 0 {CX + ar} {pay:.0f}" '
+        f'fill="none" stroke="{LC}" stroke-width="1.5"/>'
+    )
+
+    # Goal
+    gw = 42
+    parts.append(
+        f'<rect x="{CX - gw / 2:.0f}" y="{PY + PH:.0f}" width="{gw}" height="8" '
+        f'rx="2" fill="rgba(255,255,255,0.12)" stroke="{LC}" stroke-width="1"/>'
+    )
+
+    # --- place players ---
+    CR = 15            # circle radius
+    mx = 30            # horizontal margin
+    mt, mb = 38, 48   # top/bottom margin within pitch
+
+    for rn, plist in sorted(rows.items()):
+        frac = 0.0 if max_row <= 1 else (rn - 1) / (max_row - 1)
+        y = PY + PH - mb - frac * (PH - mt - mb)
+
+        spl = sorted(plist, key=lambda x: x[0])
+        mc = max(c for c, _ in spl)
+
+        for col, p in spl:
+            x = CX if mc <= 1 else PX + mx + (col - 1) / (mc - 1) * (PW - 2 * mx)
+
+            num = p.get("number", "")
+            nm = p.get("name", "")
+            sur = (nm.split() or [""])[-1]
+            if len(sur) > 11:
+                sur = sur[:10] + "."
+            sur = _esc(sur)
+
+            parts.append(
+                f'<circle cx="{x:.0f}" cy="{y:.0f}" r="{CR}" '
+                f'fill="white" fill-opacity="0.92"/>'
+            )
+            parts.append(
+                f'<text x="{x:.0f}" y="{y + 4:.0f}" text-anchor="middle" '
+                f'font-size="12" font-weight="700" fill="#1a472a">{num}</text>'
+            )
+            parts.append(
+                f'<text x="{x:.0f}" y="{y + CR + 11:.0f}" text-anchor="middle" '
+                f'font-size="8.5" font-weight="600" fill="white" '
+                f'fill-opacity="0.9">{sur}</text>'
+            )
+
+    # Formation label
+    if formation:
+        parts.append(
+            f'<text x="{CX}" y="{H - 6}" text-anchor="middle" '
+            f'font-size="12" font-weight="700" '
+            f'fill="rgba(255,255,255,0.6)">{_esc(formation)}</text>'
+        )
+
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Formation rendering
 # ---------------------------------------------------------------------------
 
 def _render_formations(formations: list, team_label: str = "") -> None:
-    """Render Sofascore formation data with summary."""
+    """Render formation data with pitch diagrams and summary."""
     if not formations:
         return
 
+    import base64
     from collections import Counter
 
     freq = Counter(f.get("formation") or "N/A" for f in formations)
@@ -184,17 +340,18 @@ def _render_formations(formations: list, team_label: str = "") -> None:
     cols = st.columns(min(len(formations), 3))
     for idx, fm in enumerate(formations):
         with cols[idx % len(cols)]:
-            img = fm.get("image_bytes")
-            if img and isinstance(img, str):
-                import base64
-                img = base64.b64decode(img)
-            if img:
-                caption = (
-                    f"{fm.get('target_team', '')} vs {fm.get('opponent', '')} "
-                    f"({fm.get('match_date', '?')}) — {fm.get('formation', 'N/A')}"
-                )
-                st.image(img, caption=caption, use_container_width=True)
-            # Always show a visible card with formation info
+            # Pitch diagram from API-Football grid data
+            lineup_grid = fm.get("lineup_grid")
+            if lineup_grid:
+                svg = _formation_svg(lineup_grid, fm.get("formation", ""))
+                if svg:
+                    b64 = base64.b64encode(svg.encode()).decode()
+                    st.markdown(
+                        f'<img src="data:image/svg+xml;base64,{b64}" '
+                        f'style="width:100%">',
+                        unsafe_allow_html=True,
+                    )
+            # Text card
             formation = fm.get("formation", "N/A")
             opponent = fm.get("opponent", "")
             match_date = fm.get("match_date", "?")

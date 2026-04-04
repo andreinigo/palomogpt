@@ -251,6 +251,17 @@ def _get_lineup(
         if p.get("player", {}).get("name")
     ]
 
+    lineup_grid = [
+        {
+            "name": pl["name"],
+            "number": pl.get("number", ""),
+            "pos": pl.get("pos", ""),
+            "grid": pl.get("grid", ""),
+        }
+        for p in starters
+        if (pl := p.get("player")) and pl.get("name")
+    ]
+
     return {
         "index": index,
         "match_url": "",
@@ -262,6 +273,7 @@ def _get_lineup(
         "target_side": "left" if is_home else "right",
         "formation": target["formation"],
         "players": player_names,
+        "lineup_grid": lineup_grid,
         "image_bytes": None,
     }
 
