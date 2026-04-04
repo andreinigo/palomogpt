@@ -6,7 +6,6 @@ Streamlit app; no Railway scraper service needed.
 from __future__ import annotations
 
 import re
-from difflib import SequenceMatcher
 from typing import Any, Optional
 
 import requests
@@ -62,30 +61,28 @@ def resolve_team(name: str) -> tuple[int, str] | None:
     or ``None``.  Results are cached in-process."""
     import unicodedata
 
+    def _fold(s: str) -> str:
+        """Lower-case + strip diacritics for comparison."""
+        nfkd = unicodedata.normalize("NFKD", s.lower())
+        return "".join(c for c in nfkd if not unicodedata.combining(c))
+
     clean = re.sub(r"\s*\(equipo femenino\)\s*$", "", name.strip(), flags=re.I)
     key = clean.lower()
     if key in _team_cache:
         return _team_cache[key]
 
-    def _ascii(s: str) -> str:
-        """Strip diacritics so API accepts the search."""
-        nfkd = unicodedata.normalize("NFKD", s)
-        return "".join(c for c in nfkd if not unicodedata.combining(c))
+    # --- normalise for API (alphanumeric + spaces only) ---
+    sanitized = re.sub(r"[^a-zA-Z0-9\s]", "", _fold(clean)).strip()
+    sanitized = re.sub(r"\s+", " ", sanitized)
 
-    # Build search variants: original, ascii-folded, stripped of prefixes/suffixes
+    # --- search variants: full → core words (>3 chars) → longest word ---
+    words = sanitized.split()
+    core = [w for w in words if len(w) > 3]
     variants: list[str] = []
-    for base in (clean, _ascii(clean)):
-        if base not in variants:
-            variants.append(base)
-        stripped = re.sub(
-            r"^(FC|CF|CD|AC|AS|RC|SD|CA|SC|SE|US|SS|SL|RCD|SSC|AFC|BSC)\s+",
-            "", base, flags=re.I,
-        )
-        stripped = re.sub(
-            r"\s+(FC|CF|SC|AC|FK|SK|BK)$", "", stripped, flags=re.I,
-        )
-        if stripped != base and len(stripped) >= 3 and stripped not in variants:
-            variants.append(stripped)
+    for v in (sanitized, " ".join(core) if core else None,
+              max(core or words, key=len) if words else None):
+        if v and v not in variants and len(v) >= 3:
+            variants.append(v)
 
     teams: list = []
     for variant in variants:
@@ -97,27 +94,38 @@ def resolve_team(name: str) -> tuple[int, str] | None:
         )
         resp.raise_for_status()
         data = resp.json()
-
         if data.get("errors"):
-            print(f"[api-football] team search errors: {data['errors']}")
             continue
-
         teams = data.get("response", [])
         if teams:
             break
+
     if not teams:
         print(f"[api-football] no team found for '{clean}'")
         return None
 
-    # Match against the *original* name to avoid false positives (e.g. women's team)
-    best_id, best_score, best_name = None, 0.0, ""
+    # --- pick best match (compare ascii-folded to handle diacritics) ---
+    q = _fold(clean)
+    q_tokens = set(q.split())
+    best_id, best_score, best_name = None, -1.0, ""
+
     for t in teams:
         tm = t["team"]
-        candidate = tm["name"].lower()
-        score = SequenceMatcher(None, key, candidate).ratio()
-        # Penalise women's / youth teams unless the user asked for one
-        if re.search(r"\bW$|\bfemenino\b|\bU\d", tm["name"], re.I) and not re.search(r"\bW$|\bfemenino\b|\bU\d", clean, re.I):
-            score *= 0.5
+        c = _fold(tm["name"])
+        c_tokens = set(c.split())
+
+        # containment → high base score; otherwise token overlap
+        if c in q or q in c:
+            score = 2.0
+        else:
+            overlap = q_tokens & c_tokens
+            score = len(overlap) / max(len(q_tokens), len(c_tokens))
+
+        # penalise women / youth / reserve unless explicitly requested
+        if re.search(r"\bW$|\bB$|\bII$|\bU\d|\bfemenino\b", tm["name"], re.I):
+            if not re.search(r"\bW$|\bfemenino\b|\bU\d", clean, re.I):
+                score *= 0.2
+
         if score > best_score:
             best_score = score
             best_id = tm["id"]
