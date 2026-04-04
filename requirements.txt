@@ -4,5 +4,3 @@ fpdf2
 google-genai
 supabase
 anthropic
-playwright
-Pillow

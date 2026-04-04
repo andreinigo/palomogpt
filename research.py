@@ -40,82 +40,17 @@ from database import _find_existing_team_research
 
 
 # ---------------------------------------------------------------------------
-# Sofascore formation crawler helper
+# API-Football helpers
 # ---------------------------------------------------------------------------
 
-def _crawl_formations(team_name: str, limit: int = 10) -> list[dict]:
-    """Fetch recent formations via the scraper micro-service (Railway).
-    Falls back to local Playwright if SCRAPER_URL is not configured.
-    Returns list of dicts with formation, players, and image_bytes."""
-    import base64, requests
-
-    # --- Try remote scraper service first ---
+def _fetch_formations(team_name: str, limit: int = 10) -> list[dict]:
+    """Fetch recent formations via API-Football.com."""
     try:
-        import streamlit as _st
-        scraper_url = _st.secrets.get("SCRAPER_URL", "")
-        scraper_key = _st.secrets.get("SCRAPER_API_KEY", "")
-    except Exception:
-        scraper_url = ""
-        scraper_key = ""
-
-    if scraper_url:
-        try:
-            headers = {}
-            if scraper_key:
-                headers["Authorization"] = f"Bearer {scraper_key}"
-            resp = requests.post(
-                f"{scraper_url.rstrip('/')}/crawl",
-                json={"team_name": team_name, "limit": limit},
-                headers=headers,
-                timeout=300,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            results: list[dict] = []
-            for entry in data.get("formations", []):
-                img_b64 = entry.pop("image_base64", None)
-                entry["image_bytes"] = base64.b64decode(img_b64) if img_b64 else None
-                results.append(entry)
-            return results
-        except Exception as exc:
-            print(f"[formations] Remote scraper error for {team_name}: {exc}")
-            # fall through to local attempt
-
-    # --- Fallback: local Playwright ---
-    import tempfile, shutil
-    try:
-        from sofascore_formations_crawler import crawl_team_lineups
-        from dataclasses import asdict
-        from pathlib import Path
-    except ImportError:
-        return []
-    tmp_dir = None
-    try:
-        tmp_dir = Path(tempfile.mkdtemp(prefix="formations_"))
-        lineups = crawl_team_lineups(
-            team_query=team_name,
-            limit=limit,
-            output_dir=tmp_dir,
-            headless=True,
-        )
-        results = []
-        for lu in lineups:
-            entry = asdict(lu)
-            img_path = Path(entry.get("image_path", ""))
-            if img_path.exists():
-                entry["image_bytes"] = img_path.read_bytes()
-            else:
-                entry["image_bytes"] = None
-            entry.pop("image_path", None)
-            entry.pop("raw_image_path", None)
-            results.append(entry)
-        return results
+        from apifootball import get_formations
+        return get_formations(team_name, limit=limit)
     except Exception as exc:
-        print(f"[formations] Error crawling {team_name}: {exc}")
+        print(f"[formations] API-Football error for {team_name}: {exc}")
         return []
-    finally:
-        if tmp_dir and tmp_dir.exists():
-            shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +179,24 @@ def _research_team_history(
     season_curr = CURRENT_YEAR - 1
     season_next = CURRENT_YEAR
 
+    # --- Pre-fetch verified fixture results for grounding ---
+    grounding_block = ""
+    try:
+        from apifootball import resolve_team, get_fixture_results
+        resolved = resolve_team(team_name)
+        if resolved:
+            team_id, _ = resolved
+            recent = get_fixture_results(team_id, limit=20)
+            if recent:
+                lines = [f"  {r['date']}  {r['home']} {r['score']} {r['away']}  ({r['tournament']})" for r in recent]
+                grounding_block = (
+                    "\n\nDATOS VERIFICADOS (API-Football) — Resultados recientes de "
+                    f"{team_name}:\n" + "\n".join(lines) + "\n"
+                    "Usa estos resultados como referencia fiable para tu análisis.\n"
+                )
+    except Exception as exc:
+        print(f"[history] fixture grounding failed for {team_name}: {exc}")
+
     prompt = TEAM_HISTORY_PROMPT.format(
         team_name=team_name,
         season_prev=season_prev,
@@ -260,6 +213,7 @@ def _research_team_history(
             f"Temporadas {season_prev}/{season_curr} y {season_curr}/{season_next}. "
             "Sé exhaustivo con cada competición — especialmente en competiciones europeas "
             "donde necesito CADA partido con resultado y goleadores."
+            + grounding_block
         ),
     )
 
@@ -301,6 +255,21 @@ def _fetch_player_list(
     api_key: str,
     _retries: int = 2,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Get a club squad — API-Football primary, Gemini fallback."""
+    # --- Try API-Football first (faster, no LLM tokens) ---
+    try:
+        from apifootball import resolve_team, get_squad
+        resolved = resolve_team(team_name)
+        if resolved:
+            team_id, _canonical = resolved
+            squad = get_squad(team_id)
+            if squad:
+                print(f"[Roster] API-Football squad for {team_name}: {len(squad)} players")
+                return squad, _empty_token_usage()
+    except Exception as exc:
+        print(f"[Roster] API-Football squad failed for {team_name}: {exc}")
+
+    # --- Fallback: Gemini + Google Search ---
     season_curr = CURRENT_YEAR - 1
     season_next = CURRENT_YEAR
 
@@ -948,6 +917,20 @@ def run_match_preparation(
         _cb("✅ Entrenadores ya disponibles — reutilizando.")
     _save(results)
 
+    # --- Fire formation fetches in background (fast API calls) ---
+    _formation_executor = ThreadPoolExecutor(max_workers=2)
+    _formation_futures: dict = {}
+    if not results.get("home_formations"):
+        _cb(f"⚽ Buscando formaciones de **{research_home}** (en paralelo)…")
+        _formation_futures["home_formations"] = _formation_executor.submit(
+            _fetch_formations, research_home, 10,
+        )
+    if not results.get("away_formations"):
+        _cb(f"⚽ Buscando formaciones de **{research_away}** (en paralelo)…")
+        _formation_futures["away_formations"] = _formation_executor.submit(
+            _fetch_formations, research_away, 10,
+        )
+
     # Phase 2: rosters
     if not _roster_is_complete(results.get("home_roster", [])):
         existing_home = results.get("home_roster", [])
@@ -1033,13 +1016,14 @@ def run_match_preparation(
         _cb("✅ Frases de Palomo ya disponibles — reutilizando.")
     _save(results)
 
-    # --- Formations (Sofascore) ---
-    if not results.get("home_formations"):
-        _cb(f"⚽ Buscando formaciones recientes de **{research_home}**…")
-        results["home_formations"] = _crawl_formations(research_home, limit=10)
-    if not results.get("away_formations"):
-        _cb(f"⚽ Buscando formaciones recientes de **{research_away}**…")
-        results["away_formations"] = _crawl_formations(research_away, limit=10)
+    # --- Collect formation results (launched in parallel earlier) ---
+    for key, fut in _formation_futures.items():
+        try:
+            results[key] = fut.result(timeout=60)
+        except Exception as exc:
+            print(f"[formations] {key} failed: {exc}")
+            results[key] = []
+    _formation_executor.shutdown(wait=False)
     _save(results)
 
     return results
@@ -1137,10 +1121,10 @@ def run_team_research(
         _cb(f"✅ Plantilla de **{research_name}** ya disponible — reutilizando.")
     _save(results)
 
-    # --- Formations (Sofascore) ---
+    # --- Formations (API-Football) ---
     if not results.get("formations"):
         _cb(f"⚽ Buscando formaciones recientes de **{research_name}**…")
-        results["formations"] = _crawl_formations(research_name, limit=10)
+        results["formations"] = _fetch_formations(research_name, limit=10)
     _save(results)
 
     return results
@@ -1423,10 +1407,10 @@ def run_national_team_research(
         _cb(f"✅ Convocatoria de **{country}** ya disponible — reutilizando.")
     _save(results)
 
-    # --- Formations (Sofascore) ---
+    # --- Formations (API-Football) ---
     if not results.get("formations"):
         _cb(f"⚽ Buscando formaciones recientes de **{country}**…")
-        results["formations"] = _crawl_formations(country, limit=10)
+        results["formations"] = _fetch_formations(country, limit=10)
     _save(results)
 
     return results
@@ -1493,6 +1477,20 @@ def run_national_match_prep(
         _cb("✅ Análisis ya disponible — reutilizando.")
     _save(results)
 
+    # --- Fire formation fetches in background (fast API calls) ---
+    _nat_fm_executor = ThreadPoolExecutor(max_workers=2)
+    _nat_fm_futures: dict = {}
+    if not results.get("home_formations"):
+        _cb(f"⚽ Buscando formaciones de **{research_home}** (en paralelo)…")
+        _nat_fm_futures["home_formations"] = _nat_fm_executor.submit(
+            _fetch_formations, research_home, 10,
+        )
+    if not results.get("away_formations"):
+        _cb(f"⚽ Buscando formaciones de **{research_away}** (en paralelo)…")
+        _nat_fm_futures["away_formations"] = _nat_fm_executor.submit(
+            _fetch_formations, research_away, 10,
+        )
+
     if not _roster_is_complete(results.get("home_roster", [])):
         existing_home = results.get("home_roster", [])
         if existing_home:
@@ -1557,13 +1555,14 @@ def run_national_match_prep(
         _cb(f"✅ Convocatoria de **{research_away}** ya disponible — reutilizando.")
     _save(results)
 
-    # --- Formations (Sofascore) ---
-    if not results.get("home_formations"):
-        _cb(f"⚽ Buscando formaciones recientes de **{research_home}**…")
-        results["home_formations"] = _crawl_formations(research_home, limit=10)
-    if not results.get("away_formations"):
-        _cb(f"⚽ Buscando formaciones recientes de **{research_away}**…")
-        results["away_formations"] = _crawl_formations(research_away, limit=10)
+    # --- Collect formation results (launched in parallel earlier) ---
+    for key, fut in _nat_fm_futures.items():
+        try:
+            results[key] = fut.result(timeout=60)
+        except Exception as exc:
+            print(f"[formations] {key} failed: {exc}")
+            results[key] = []
+    _nat_fm_executor.shutdown(wait=False)
     _save(results)
 
     return results
