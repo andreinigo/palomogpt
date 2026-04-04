@@ -486,10 +486,13 @@ def _display_match_results(config: dict, results: dict) -> None:
                     results["home_formations"] = _fetch_formations(home, limit=10)
                 if not away_fm:
                     results["away_formations"] = _fetch_formations(away, limit=10)
-            st.session_state.match_results = results
-            _save_match_prep(config, results)
-            st.rerun()
-        if not home_fm and not away_fm:
+            if results.get("home_formations") or results.get("away_formations"):
+                st.session_state.match_results = results
+                _save_match_prep(config, results)
+                st.rerun()
+            else:
+                st.error("No se encontraron formaciones. Revisa que APIFOOTBALL_KEY esté configurado en los secrets.")
+        elif not home_fm and not away_fm:
             st.info("Las formaciones aún no se han generado.")
 
 
@@ -745,11 +748,16 @@ def _display_team_research_results(config: dict, results: dict) -> None:
         st.markdown("### ⚽ Parado Táctico")
         if st.button("⚽ Buscar formaciones", key="fetch_team_formations", use_container_width=True):
             with st.spinner(f"Buscando formaciones de **{team}**…"):
-                results["formations"] = _fetch_formations(team, limit=10)
-            st.session_state.team_research_results = results
-            _save_team_research(config, results)
-            st.rerun()
-        st.info("Las formaciones aún no se han generado.")
+                fms = _fetch_formations(team, limit=10)
+            if fms:
+                results["formations"] = fms
+                st.session_state.team_research_results = results
+                _save_team_research(config, results)
+                st.rerun()
+            else:
+                st.error(f"No se encontraron formaciones para **{team}**. Revisa que APIFOOTBALL_KEY esté configurado en los secrets.")
+        else:
+            st.info("Las formaciones aún no se han generado.")
 
 
 def _fill_team_roster_gaps(config: dict, results: dict, api_key: str) -> None:

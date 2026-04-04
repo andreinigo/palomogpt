@@ -47,8 +47,12 @@ def _fetch_formations(team_name: str, limit: int = 10) -> list[dict]:
     """Fetch recent formations via API-Football.com."""
     try:
         from apifootball import get_formations
-        return get_formations(team_name, limit=limit)
+        formations = get_formations(team_name, limit=limit)
+        print(f"[formations] got {len(formations)} formations for {team_name}")
+        return formations
     except Exception as exc:
+        import traceback
+        traceback.print_exc()
         print(f"[formations] API-Football error for {team_name}: {exc}")
         return []
 

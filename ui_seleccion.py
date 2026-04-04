@@ -215,11 +215,16 @@ def _display_sel_team_results(config: dict, results: dict) -> None:
         st.markdown("### ⚽ Parado Táctico")
         if st.button("⚽ Buscar formaciones", key="fetch_sel_formations", use_container_width=True):
             with st.spinner(f"Buscando formaciones de **{country}**…"):
-                results["formations"] = _fetch_formations(country, limit=10)
-            st.session_state.nat_team_results = results
-            _save_national_team_research(config, results)
-            st.rerun()
-        st.info("Las formaciones aún no se han generado.")
+                fms = _fetch_formations(country, limit=10)
+            if fms:
+                results["formations"] = fms
+                st.session_state.nat_team_results = results
+                _save_national_team_research(config, results)
+                st.rerun()
+            else:
+                st.error(f"No se encontraron formaciones para **{country}**. Revisa que APIFOOTBALL_KEY esté configurado en los secrets.")
+        else:
+            st.info("Las formaciones aún no se han generado.")
 
 
 def _fill_sel_team_roster_gaps(config: dict, results: dict, api_key: str) -> None:
@@ -464,10 +469,13 @@ def _display_sel_match_results(config: dict, results: dict) -> None:
                     results["home_formations"] = _fetch_formations(home, limit=10)
                 if not away_fm:
                     results["away_formations"] = _fetch_formations(away, limit=10)
-            st.session_state.nat_match_results = results
-            _save_national_match_prep(config, results)
-            st.rerun()
-        if not home_fm and not away_fm:
+            if results.get("home_formations") or results.get("away_formations"):
+                st.session_state.nat_match_results = results
+                _save_national_match_prep(config, results)
+                st.rerun()
+            else:
+                st.error("No se encontraron formaciones. Revisa que APIFOOTBALL_KEY esté configurado en los secrets.")
+        elif not home_fm and not away_fm:
             st.info("Las formaciones aún no se han generado.")
 
 
