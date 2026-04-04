@@ -276,15 +276,27 @@ def _formation_svg(lineup_grid: list[dict], formation: str = "") -> str:
     mx = 30            # horizontal margin
     mt, mb = 38, 48   # top/bottom margin within pitch
 
+    # global max columns across all rows — used as the reference grid width
+    global_mc = max(max(c for c, _ in plist) for plist in rows.values())
+
     for rn, plist in sorted(rows.items()):
         frac = 0.0 if max_row <= 1 else (rn - 1) / (max_row - 1)
         y = PY + PH - mb - frac * (PH - mt - mb)
 
         spl = sorted(plist, key=lambda x: x[0])
-        mc = max(c for c, _ in spl)
+        n_in_row = len(spl)
 
         for col, p in spl:
-            x = CX if mc <= 1 else PX + mx + (col - 1) / (mc - 1) * (PW - 2 * mx)
+            if global_mc <= 1:
+                x = CX
+            elif n_in_row == 1:
+                x = CX
+            else:
+                # Centre the row's players within the global grid width
+                # e.g. 2 players in a 4-wide grid → positioned at cols ~2 and ~3
+                row_mc = max(c for c, _ in spl)
+                offset = (global_mc - row_mc) / 2
+                x = PX + mx + (col - 1 + offset) / (global_mc - 1) * (PW - 2 * mx)
 
             num = p.get("number", "")
             nm = p.get("name", "")
