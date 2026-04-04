@@ -60,33 +60,64 @@ def _current_season() -> int:
 def resolve_team(name: str) -> tuple[int, str] | None:
     """Search API-Football for *name* and return ``(team_id, canonical_name)``
     or ``None``.  Results are cached in-process."""
+    import unicodedata
+
     clean = re.sub(r"\s*\(equipo femenino\)\s*$", "", name.strip(), flags=re.I)
     key = clean.lower()
     if key in _team_cache:
         return _team_cache[key]
 
-    resp = requests.get(
-        f"{_BASE}/teams",
-        headers=_headers(),
-        params={"search": clean},
-        timeout=15,
-    )
-    resp.raise_for_status()
-    data = resp.json()
+    def _ascii(s: str) -> str:
+        """Strip diacritics so API accepts the search."""
+        nfkd = unicodedata.normalize("NFKD", s)
+        return "".join(c for c in nfkd if not unicodedata.combining(c))
 
-    if data.get("errors"):
-        print(f"[api-football] team search errors: {data['errors']}")
-        return None
+    # Build search variants: original, ascii-folded, stripped of prefixes/suffixes
+    variants: list[str] = []
+    for base in (clean, _ascii(clean)):
+        if base not in variants:
+            variants.append(base)
+        stripped = re.sub(
+            r"^(FC|CF|CD|AC|AS|RC|SD|CA|SC|SE|US|SS|SL|RCD|SSC|AFC|BSC)\s+",
+            "", base, flags=re.I,
+        )
+        stripped = re.sub(
+            r"\s+(FC|CF|SC|AC|FK|SK|BK)$", "", stripped, flags=re.I,
+        )
+        if stripped != base and len(stripped) >= 3 and stripped not in variants:
+            variants.append(stripped)
 
-    teams = data.get("response", [])
+    teams: list = []
+    for variant in variants:
+        resp = requests.get(
+            f"{_BASE}/teams",
+            headers=_headers(),
+            params={"search": variant},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        if data.get("errors"):
+            print(f"[api-football] team search errors: {data['errors']}")
+            continue
+
+        teams = data.get("response", [])
+        if teams:
+            break
     if not teams:
         print(f"[api-football] no team found for '{clean}'")
         return None
 
+    # Match against the *original* name to avoid false positives (e.g. women's team)
     best_id, best_score, best_name = None, 0.0, ""
     for t in teams:
         tm = t["team"]
-        score = SequenceMatcher(None, key, tm["name"].lower()).ratio()
+        candidate = tm["name"].lower()
+        score = SequenceMatcher(None, key, candidate).ratio()
+        # Penalise women's / youth teams unless the user asked for one
+        if re.search(r"\bW$|\bfemenino\b|\bU\d", tm["name"], re.I) and not re.search(r"\bW$|\bfemenino\b|\bU\d", clean, re.I):
+            score *= 0.5
         if score > best_score:
             best_score = score
             best_id = tm["id"]
