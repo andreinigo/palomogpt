@@ -29,6 +29,7 @@ from metrics import (
     _workflow_step_count,
 )
 from research import (
+    _fetch_formations,
     _roster_has_failures,
     fill_roster_gaps,
     run_national_match_prep,
@@ -212,7 +213,13 @@ def _display_sel_team_results(config: dict, results: dict) -> None:
         _render_formations(team_fm, team_label=country)
     else:
         st.markdown("### ⚽ Parado Táctico")
-        st.info("Las formaciones aún no se han generado. Ejecuta el análisis de la selección para obtenerlas.")
+        if st.button("⚽ Buscar formaciones", key="fetch_sel_formations", use_container_width=True):
+            with st.spinner(f"Buscando formaciones de **{country}**…"):
+                results["formations"] = _fetch_formations(country, limit=10)
+            st.session_state.nat_team_results = results
+            _save_national_team_research(config, results)
+            st.rerun()
+        st.info("Las formaciones aún no se han generado.")
 
 
 def _fill_sel_team_roster_gaps(config: dict, results: dict, api_key: str) -> None:
@@ -449,9 +456,19 @@ def _display_sel_match_results(config: dict, results: dict) -> None:
         _render_formations(home_fm, team_label=home)
     if away_fm:
         _render_formations(away_fm, team_label=away)
-    if not home_fm and not away_fm:
+    if not home_fm or not away_fm:
         st.markdown("### ⚽ Parado Táctico")
-        st.info("Las formaciones aún no se han generado. Ejecuta la preparación del partido para obtenerlas.")
+        if st.button("⚽ Buscar formaciones", key="fetch_nmp_formations", use_container_width=True):
+            with st.spinner("Buscando formaciones…"):
+                if not home_fm:
+                    results["home_formations"] = _fetch_formations(home, limit=10)
+                if not away_fm:
+                    results["away_formations"] = _fetch_formations(away, limit=10)
+            st.session_state.nat_match_results = results
+            _save_national_match_prep(config, results)
+            st.rerun()
+        if not home_fm and not away_fm:
+            st.info("Las formaciones aún no se han generado.")
 
 
 def _fill_sel_match_roster_gaps(config: dict, results: dict, side: str, api_key: str) -> None:

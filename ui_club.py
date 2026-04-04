@@ -38,6 +38,7 @@ from pdf_gen import generate_match_pdf
 from prompts import MATCH_VALIDATION_PROMPT
 from research import (
     _POS_LABELS,
+    _fetch_formations,
     _roster_has_failures,
     fill_roster_gaps,
     run_match_preparation,
@@ -477,9 +478,19 @@ def _display_match_results(config: dict, results: dict) -> None:
         _render_formations(home_fm, team_label=home)
     if away_fm:
         _render_formations(away_fm, team_label=away)
-    if not home_fm and not away_fm:
+    if not home_fm or not away_fm:
         st.markdown("### ⚽ Parado Táctico")
-        st.info("Las formaciones aún no se han generado. Ejecuta la preparación del partido para obtenerlas.")
+        if st.button("⚽ Buscar formaciones", key="fetch_match_formations", use_container_width=True):
+            with st.spinner("Buscando formaciones…"):
+                if not home_fm:
+                    results["home_formations"] = _fetch_formations(home, limit=10)
+                if not away_fm:
+                    results["away_formations"] = _fetch_formations(away, limit=10)
+            st.session_state.match_results = results
+            _save_match_prep(config, results)
+            st.rerun()
+        if not home_fm and not away_fm:
+            st.info("Las formaciones aún no se han generado.")
 
 
 def _fill_match_roster_gaps(config: dict, results: dict, side: str, api_key: str) -> None:
@@ -732,7 +743,13 @@ def _display_team_research_results(config: dict, results: dict) -> None:
         _render_formations(team_fm, team_label=team)
     else:
         st.markdown("### ⚽ Parado Táctico")
-        st.info("Las formaciones aún no se han generado. Ejecuta el análisis del equipo para obtenerlas.")
+        if st.button("⚽ Buscar formaciones", key="fetch_team_formations", use_container_width=True):
+            with st.spinner(f"Buscando formaciones de **{team}**…"):
+                results["formations"] = _fetch_formations(team, limit=10)
+            st.session_state.team_research_results = results
+            _save_team_research(config, results)
+            st.rerun()
+        st.info("Las formaciones aún no se han generado.")
 
 
 def _fill_team_roster_gaps(config: dict, results: dict, api_key: str) -> None:
