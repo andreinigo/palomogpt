@@ -62,7 +62,7 @@ def resolve_team(name: str) -> tuple[int, str] | None:
     import unicodedata
 
     def _fold(s: str) -> str:
-        """Lower-case + strip diacritics for comparison."""
+        """Lower-case + strip diacritics."""
         nfkd = unicodedata.normalize("NFKD", s.lower())
         return "".join(c for c in nfkd if not unicodedata.combining(c))
 
@@ -71,7 +71,7 @@ def resolve_team(name: str) -> tuple[int, str] | None:
     if key in _team_cache:
         return _team_cache[key]
 
-    # --- normalise for API (alphanumeric + spaces only) ---
+    # --- normalise for API search (alphanumeric + spaces only) ---
     sanitized = re.sub(r"[^a-zA-Z0-9\s]", "", _fold(clean)).strip()
     sanitized = re.sub(r"\s+", " ", sanitized)
 
@@ -104,40 +104,94 @@ def resolve_team(name: str) -> tuple[int, str] | None:
         print(f"[api-football] no team found for '{clean}'")
         return None
 
-    # --- pick best match (compare ascii-folded to handle diacritics) ---
+    # --- trivial case: single result → still validate it's not W/B/U ---
+    candidates = [
+        {"id": t["team"]["id"], "name": t["team"]["name"],
+         "country": t["team"].get("country", "")}
+        for t in teams
+    ]
+
+    if len(candidates) == 1:
+        tm = candidates[0]
+        result = (tm["id"], tm["name"])
+        _team_cache[key] = result
+        print(f"[api-football] resolved '{clean}' → {tm['name']} (id={tm['id']}, single)")
+        return result
+
+    # --- use LLM to disambiguate ---
+    picked = _llm_pick_team(clean, candidates)
+    if picked:
+        _team_cache[key] = picked
+        print(f"[api-football] resolved '{clean}' → {picked[1]} (id={picked[0]}, llm)")
+        return picked
+
+    # --- heuristic fallback (if LLM unavailable) ---
     q = _fold(clean)
     q_tokens = set(q.split())
     best_id, best_score, best_name = None, -1.0, ""
-
-    for t in teams:
-        tm = t["team"]
-        c = _fold(tm["name"])
-        c_tokens = set(c.split())
-
-        # containment → high base score; otherwise token overlap
-        if c in q or q in c:
+    for c in candidates:
+        cn = _fold(c["name"])
+        cn_tokens = set(cn.split())
+        if cn in q or q in cn:
             score = 2.0
         else:
-            overlap = q_tokens & c_tokens
-            score = len(overlap) / max(len(q_tokens), len(c_tokens))
-
-        # penalise women / youth / reserve unless explicitly requested
-        if re.search(r"\bW$|\bB$|\bII$|\bU\d|\bfemenino\b", tm["name"], re.I):
-            if not re.search(r"\bW$|\bfemenino\b|\bU\d", clean, re.I):
-                score *= 0.2
-
+            overlap = q_tokens & cn_tokens
+            score = len(overlap) / max(len(q_tokens), len(cn_tokens)) if q_tokens or cn_tokens else 0.0
+        # penalise women / youth / reserve
+        if re.search(r"\bW$|\bB$|\bII$|\bU\d|\bfemenino\b", c["name"], re.I):
+            score *= 0.2
         if score > best_score:
-            best_score = score
-            best_id = tm["id"]
-            best_name = tm["name"]
+            best_score, best_id, best_name = score, c["id"], c["name"]
 
-    if best_id is None:
-        return None
-
-    result = (best_id, best_name)
+    result = (best_id, best_name) if best_id else (candidates[0]["id"], candidates[0]["name"])
     _team_cache[key] = result
-    print(f"[api-football] resolved '{clean}' → {best_name} (id={best_id}, score={best_score:.2f})")
+    print(f"[api-football] resolved '{clean}' → {result[1]} (id={result[0]}, heuristic)")
     return result
+
+
+def _llm_pick_team(
+    query: str, candidates: list[dict[str, Any]],
+) -> tuple[int, str] | None:
+    """Use Gemini Flash to pick the correct team from search candidates."""
+    try:
+        import streamlit as _st
+        from google import genai
+
+        api_key = _st.secrets.get("GEMINI_API_KEY", "")
+        if not api_key:
+            return None
+
+        options = "\n".join(
+            f"  {c['id']}: {c['name']} ({c['country']})" for c in candidates
+        )
+        prompt = (
+            f"The user is looking for the men's senior football team: \"{query}\"\n\n"
+            f"Candidates:\n{options}\n\n"
+            f"Reply with ONLY the numeric id of the best match. "
+            f"If none match, reply \"none\"."
+        )
+
+        client = genai.Client(
+            api_key=api_key,
+            http_options={"timeout": 10_000},
+        )
+        resp = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=prompt,
+        )
+        answer = (resp.text or "").strip()
+        # parse the id
+        m = re.search(r"\d+", answer)
+        if not m:
+            return None
+        chosen_id = int(m.group())
+        for c in candidates:
+            if c["id"] == chosen_id:
+                return (c["id"], c["name"])
+        return None
+    except Exception as exc:
+        print(f"[api-football] LLM pick failed: {exc}")
+        return None
 
 
 # ---------------------------------------------------------------------------
