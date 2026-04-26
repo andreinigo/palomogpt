@@ -46,6 +46,7 @@ Locally, create a `.streamlit/secrets.toml` file (this is safely gitignored):
 GEMINI_API_KEY = "your-gemini-key"
 SUPABASE_URL = "https://your-project.supabase.co"
 SUPABASE_KEY = "your-supabase-anon-or-service-key"
+APP_ACCESS_KEY = "your-app-password"
 DASHBOARD_ACCESS_KEY = "your-admin-dashboard-password"
 ```
 
@@ -57,6 +58,7 @@ streamlit run chatbot_app_v4.py
 ### Usage Dashboard
 - Apply the existing setup SQL files plus `setup_usage_dashboard.sql` in Supabase.
 - Open the normal app at `/`.
+- If `APP_ACCESS_KEY` is configured, the whole app at `/` is protected by a simple password wall.
 - Open the hidden admin dashboard by going directly to `/dashboard` on the same Streamlit app URL.
 - The dashboard is not linked anywhere in the UI and requires `DASHBOARD_ACCESS_KEY`.
 - Historical structured workflow usage can be backfilled from the dashboard; older PalomoGPT and legacy PDF exports from before this feature cannot be reconstructed.

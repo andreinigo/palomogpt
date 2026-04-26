@@ -46,11 +46,47 @@ from ui_palomo import _render_palomo_gpt
 from ui_seleccion import _render_seleccion
 
 
+APP_ACCESS_STATE_KEY = "app_access_granted"
+
+
+def _app_access_granted() -> bool:
+    """Render a minimal access wall and return whether the app is unlocked."""
+    expected_key = str(st.secrets.get("APP_ACCESS_KEY", "") or "")
+    if not expected_key:
+        # If not configured, keep current behavior (no global wall).
+        return True
+
+    if st.session_state.get(APP_ACCESS_STATE_KEY):
+        return True
+
+    st.markdown(
+        '<p class="hero-title">⚽ PalomoFacts</p>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<p class="hero-sub">Área privada. Ingresa la clave para continuar.</p>',
+        unsafe_allow_html=True,
+    )
+
+    with st.form("app_access_form", clear_on_submit=False):
+        access_key = st.text_input("Access key", type="password")
+        submitted = st.form_submit_button("Enter app", use_container_width=True, type="primary")
+        if submitted:
+            if access_key == expected_key:
+                st.session_state[APP_ACCESS_STATE_KEY] = True
+                st.rerun()
+            st.error("Clave incorrecta.")
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Root page — sidebar + mode routing
 # ---------------------------------------------------------------------------
 
 def _render_root_page() -> None:
+    if not _app_access_granted():
+        return
+
     api_key = st.secrets.get("GEMINI_API_KEY", "")
 
     if "messages" not in st.session_state:
